@@ -1,0 +1,9 @@
+.env
+edgeswarm-node.env
+*.gguf
+*.download
+models/
+__pycache__/
+*.pyc
+*.log
+.DS_Store

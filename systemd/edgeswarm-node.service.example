@@ -1,0 +1,18 @@
+[Unit]
+Description=EdgeSwarm Linux Headless Node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_LINUX_USER
+WorkingDirectory=/home/YOUR_LINUX_USER/edgeswarm-node
+EnvironmentFile=/home/YOUR_LINUX_USER/edgeswarm-node/edgeswarm-node.env
+ExecStart=/usr/bin/python3 /home/YOUR_LINUX_USER/edgeswarm-node/edgeswarm_node.py
+Restart=always
+RestartSec=8
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
