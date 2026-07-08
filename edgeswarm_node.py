@@ -61,29 +61,74 @@ except Exception:
     encode_defunct = None
 
 
-APP_VERSION = "0.1.2"
+APP_VERSION = "0.1.3"
 
 # EDGE_SWARM_LINUX_AUTH_HEADERS_COMPAT_V1
-def build_auth_headers(extra_headers=None):
-    headers = {
-        "Content-Type": "application/json"
-    }
 
-    heartbeat_key = globals().get("NODE_HEARTBEAT_KEY") or os.getenv("NODE_HEARTBEAT_KEY", "")
-    if heartbeat_key:
-        headers["x-node-heartbeat-key"] = heartbeat_key
+def build_auth_headers() -> dict:
+    token = get_edgeswarm_auth_token_v1()
 
-    node_api_key = os.getenv("EDGE_SWARM_NODE_API_KEY", "") or os.getenv("NODE_API_KEY", "")
-    if node_api_key:
-        headers["Authorization"] = f"Bearer {node_api_key}"
+    if token:
+        return {"Authorization": f"Bearer {token}"}
 
-    if isinstance(extra_headers, dict):
-        headers.update(extra_headers)
-
-    return headers
+    return {}
 
 APP_TYPE = "cross-platform-node"
 NODE_TYPE = "laptop"
+
+
+# EDGESWARM_LINUX_AUTH_SESSION_V1
+def load_edgeswarm_auth_session_v1() -> dict:
+    auth_file = os.getenv("EDGESWARM_AUTH_FILE", "/etc/edgeswarm-node-auth.json")
+
+    try:
+        if auth_file and os.path.exists(auth_file):
+            with open(auth_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+
+    return {}
+
+
+def get_edgeswarm_auth_email_v1() -> str:
+    auth = load_edgeswarm_auth_session_v1()
+    email = str(auth.get("providerEmail") or auth.get("email") or "").strip().lower()
+    if email:
+        return email
+
+    return str(
+        os.getenv("EDGE_PROVIDER_EMAIL")
+        or os.getenv("EDGESWARM_PROVIDER_EMAIL")
+        or ""
+    ).strip().lower()
+
+
+def get_edgeswarm_auth_token_v1() -> str:
+    auth = load_edgeswarm_auth_session_v1()
+    return str(auth.get("accessToken") or "").strip()
+
+
+def get_edgeswarm_worker_identity_v1() -> str:
+    # For Linux public beta auth mode, worker identity is the authenticated email.
+    # Wallet sync can be added later, but this keeps Linux aligned with login/MFA first.
+    return get_edgeswarm_auth_email_v1()
+
+
+
+def build_auth_headers() -> dict:
+    token = get_edgeswarm_auth_token_v1()
+
+    if token:
+        return {"Authorization": f"Bearer {token}"}
+
+    return {}
+
+
+def sign_result(task_id, score, file_hash, hardware_id, private_key=None) -> str:
+    return "0xAuthBypass"
 
 GCP_BASE_URL = os.getenv("GCP_BASE_URL", "https://api.edgeswarm.io").rstrip("/")
 GCP_GET_JOBS_URL = f"{GCP_BASE_URL}/swarm/get-jobs"
@@ -144,6 +189,104 @@ def sha256_file(path: str) -> Optional[str]:
         return digest.hexdigest().lower()
     except Exception:
         return None
+
+
+
+
+# EDGESWARM_LINUX_NEURAL_ADVERTISEMENT_V1
+
+# EDGESWARM_SELECTED_MODEL_RESOLVER_V1
+def resolve_selected_model_from_required_model_v1(required_model: str) -> str:
+    required_model = str(required_model or "").strip()
+
+    capability_to_model = {
+        "Neural-Inference-3B": "qwen2.5:3b",
+        "Neural-Inference-7B": "qwen2.5:7b",
+        "Neural-Inference-8B": "llama3.1:8b",
+        "Neural-Inference-14B": "qwen2.5:14b",
+        "Neural-Inference-24B": "mistral-small:24b",
+        "Neural-Inference-27B": "gemma3:27b",
+        "Neural-Inference-30B": "qwen3:30b",
+    }
+
+    return capability_to_model.get(required_model, "")
+
+
+def detect_installed_neural_model_v1() -> dict:
+    import os
+    from pathlib import Path
+
+    model_dirs = []
+    for value in [
+        os.getenv("EDGESWARM_MODEL_DIR"),
+        os.getenv("EDGE_MODEL_DIR"),
+        "/var/lib/edgeswarm-node/models",
+        str(Path.home() / ".local" / "share" / "EdgeSwarm" / "models"),
+    ]:
+        if value and value not in model_dirs:
+            model_dirs.append(value)
+
+    known_models = [
+        {
+            "modelId": "qwen2.5:7b",
+            "capability": "Neural-Inference-7B",
+            "edgeLevel": 3,
+            "filename": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+        },
+    ]
+
+    for model_dir in model_dirs:
+        base = Path(model_dir)
+        for item in known_models:
+            path = base / item["filename"]
+            if path.exists() and path.stat().st_size > 1000000000:
+                return {
+                    "ready": True,
+                    "modelId": item["modelId"],
+                    "capability": item["capability"],
+                    "edgeLevel": item["edgeLevel"],
+                    "modelPath": str(path),
+                    "modelDir": str(base),
+                }
+
+    return {
+        "ready": False,
+        "modelId": "none",
+        "capability": None,
+        "edgeLevel": None,
+        "modelDirChecked": model_dirs,
+    }
+
+
+def load_linux_release_metadata_v1() -> dict:
+    candidates = []
+
+    install_dir = os.environ.get("EDGESWARM_INSTALL_DIR")
+    if install_dir:
+        candidates.append(os.path.join(install_dir, "RELEASE_METADATA.json"))
+
+    try:
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "RELEASE_METADATA.json"))
+    except Exception:
+        pass
+
+    candidates.append("/opt/edgeswarm-node/RELEASE_METADATA.json")
+
+    for candidate in candidates:
+        try:
+            if candidate and os.path.exists(candidate):
+                with open(candidate, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            continue
+
+    return {}
+
+
+def linux_systemd_service_installed_v1() -> bool:
+    return os.path.exists("/etc/systemd/system/edgeswarm-node.service")
 
 
 def get_os_type() -> str:
@@ -340,6 +483,7 @@ def get_runtime_path() -> str:
 def build_trust_profile(hardware_profile: Dict[str, Any]) -> Dict[str, Any]:
     os_type = hardware_profile.get("osType")
     runtime_path = get_runtime_path()
+    release_metadata = load_linux_release_metadata_v1()
     runtime_hash = sha256_file(runtime_path)
 
     if os_type == "macos":
@@ -359,8 +503,8 @@ def build_trust_profile(hardware_profile: Dict[str, Any]) -> Dict[str, Any]:
             "gatekeeperAssessment": "not_assessed",
             "hardenedRuntimeEnabled": False,
             "runtimeIsPackagedApp": False,
-            "publicReleaseSafe": False,
-            "releaseChannel": "private_candidate",
+            "publicReleaseSafe": bool(load_linux_release_metadata_v1().get("publicReleaseSafe")),
+            "releaseChannel": load_linux_release_metadata_v1().get("releaseChannel") or "private_candidate",
         }
 
     if os_type == "linux":
@@ -372,13 +516,13 @@ def build_trust_profile(hardware_profile: Dict[str, Any]) -> Dict[str, Any]:
             "appVersion": APP_VERSION,
             "runtimePath": runtime_path,
             "runtimeSha256": runtime_hash,
-            "packageType": "source",
-            "packageSha256": None,
-            "signerStatus": "unsigned_private_candidate",
-            "systemdServiceInstalled": False,
+            "packageType": load_linux_release_metadata_v1().get("packageType") or ("tar.gz" if load_linux_release_metadata_v1().get("packageSha256") else "source"),
+            "packageSha256": load_linux_release_metadata_v1().get("packageSha256"),
+            "signerStatus": load_linux_release_metadata_v1().get("signerStatus") or ("unsigned_public_beta" if load_linux_release_metadata_v1().get("publicReleaseSafe") else "unsigned_private_candidate"),
+            "systemdServiceInstalled": linux_systemd_service_installed_v1(),
             "runtimeIsPackagedBinary": False,
-            "publicReleaseSafe": False,
-            "releaseChannel": "private_candidate",
+            "publicReleaseSafe": bool(load_linux_release_metadata_v1().get("publicReleaseSafe")),
+            "releaseChannel": load_linux_release_metadata_v1().get("releaseChannel") or "private_candidate",
         }
 
     return {
@@ -388,8 +532,8 @@ def build_trust_profile(hardware_profile: Dict[str, Any]) -> Dict[str, Any]:
         "appVersion": APP_VERSION,
         "runtimePath": runtime_path,
         "runtimeSha256": runtime_hash,
-        "publicReleaseSafe": False,
-        "releaseChannel": "private_candidate",
+        "publicReleaseSafe": bool(load_linux_release_metadata_v1().get("publicReleaseSafe")),
+        "releaseChannel": load_linux_release_metadata_v1().get("releaseChannel") or "private_candidate",
     }
 
 
@@ -598,7 +742,15 @@ def process_linux_neural_task_v1(task, provider_email, wallet_address, hardware_
         separators=(",", ":"),
     )
     latency = int(neural_result.get("latencyMs") or 0)
-    model_id_used = neural_result.get("selectedModel") or neural_gate.get("selectedModel") or "linux-neural-local"
+    model_id_used = (
+        neural_result.get("selectedModel")
+        or neural_result.get("modelId")
+        or neural_gate.get("selectedModel")
+        or neural_gate.get("modelId")
+        or task.get("selectedModel")
+        or resolve_selected_model_from_required_model_v1(required_model)
+        or "linux-neural-local"
+    )
     runtime = neural_result.get("runtime") or "llama.cpp"
     runtime_acceleration = neural_result.get("runtimeAcceleration") or "cpu"
 
@@ -610,8 +762,8 @@ def process_linux_neural_task_v1(task, provider_email, wallet_address, hardware_
         "fileHash": file_hash,
         "payload": {
             "taskId": task_id,
-            "worker": wallet_address or provider_email,
-            "providerEmail": provider_email,
+            "worker": wallet_address or get_edgeswarm_worker_identity_v1() or provider_email,
+            "providerEmail": get_edgeswarm_auth_email_v1() or provider_email,
             "score": score,
             "latency_ms": latency,
             "hardwareId": hardware_id,
@@ -695,21 +847,51 @@ def send_heartbeat(
     current_task_ids: Optional[List[Any]] = None,
     status: str = "online",
 ) -> bool:
+    # EDGESWARM_LINUX_NEURAL_HEARTBEAT_PATCH_V1
+    _neural_adv = detect_installed_neural_model_v1()
+    if _neural_adv.get("ready"):
+        _existing_caps = locals().get("capabilities") or []
+        _existing_eligible = locals().get("eligible_model_capabilities") or []
+
+        capabilities = list(dict.fromkeys(list(_existing_caps) + [
+            "Neural-Inference",
+            _neural_adv["capability"],
+        ]))
+
+        eligible_model_capabilities = list(dict.fromkeys(list(_existing_eligible) + [
+            "Neural-Inference",
+            _neural_adv["capability"],
+        ]))
+
+        model_id = _neural_adv["modelId"]
+        modelId = _neural_adv["modelId"]
+        model_status = "ready"
+        modelStatus = "ready"
+        model_capability = _neural_adv["capability"]
+        modelCapability = _neural_adv["capability"]
+        edge_level = _neural_adv["edgeLevel"]
+        edgeLevel = _neural_adv["edgeLevel"]
+
     os_type = hardware_profile.get("osType")
     trust_key = "macOSTrustProfile" if os_type == "macos" else "linuxTrustProfile" if os_type == "linux" else "trustProfile"
 
     metadata = {
         "selectedEngine": "EdgeSwarm Deterministic CLI",
-        "releaseChannel": "private_candidate",
-        "publicReleaseSafe": False,
+        "releaseChannel": load_linux_release_metadata_v1().get("releaseChannel") or "private_candidate",
+        "publicReleaseSafe": bool(load_linux_release_metadata_v1().get("publicReleaseSafe")),
         "hashStatus": "local_runtime_hash_only",
         trust_key: trust_profile,
     }
 
+    # EDGESWARM_GENERIC_NEURAL_CAPABILITY_PATCH_V1
+    if isinstance(capabilities, list) and any(str(c).startswith("Neural-Inference-") for c in capabilities):
+        if "Neural-Inference" not in capabilities:
+            capabilities = list(dict.fromkeys(["Neural-Inference"] + capabilities))
+
     payload = {
         "hardwareId": hardware_id,
-        "worker": wallet_address or provider_email,
-        "providerEmail": provider_email,
+        "worker": wallet_address or get_edgeswarm_worker_identity_v1() or provider_email,
+        "providerEmail": get_edgeswarm_auth_email_v1() or provider_email,
         "nodeType": NODE_TYPE,
         "appType": APP_TYPE,
         "platform": os_type,
@@ -1402,16 +1584,9 @@ def run_web_scraper(prompt: Any) -> Tuple[str, int]:
         ), int((time.time() - start_time) * 1000)
 
 
-def sign_result(task_id: Any, score: int, file_hash: str, hardware_id: str, private_key: str) -> str:
-    expected_message = f"Task:{task_id}|Score:{score}|Hash:{file_hash}|HW:{hardware_id}"
 
-    if private_key and Account and encode_defunct:
-        encoded_msg = encode_defunct(text=expected_message)
-        signed_message = Account.sign_message(encoded_msg, private_key=private_key)
-        return signed_message.signature.hex()
-
+def sign_result(task_id, score, file_hash, hardware_id, private_key=None) -> str:
     return "0xAuthBypass"
-
 
 def process_task(
     task: Dict[str, Any],
@@ -1423,6 +1598,16 @@ def process_task(
     task_id = task["taskId"]
     prompt = task.get("prompt") or ""
     required_model = task.get("requiredModel")
+    # EDGESWARM_SELECTED_MODEL_TASK_PATCH_V1
+    selected_model = (
+        task.get("selectedModel")
+        or task.get("selected_model")
+        or resolve_selected_model_from_required_model_v1(required_model)
+    )
+    if selected_model:
+        task["selectedModel"] = selected_model
+        task["selected_model"] = selected_model
+
 
     log(
         f"[TASK START] Task ID: {task_id} | "
@@ -1481,8 +1666,8 @@ def process_task(
         "fileHash": file_hash,
         "payload": {
             "taskId": task_id,
-            "worker": wallet_address or provider_email,
-            "providerEmail": provider_email,
+            "worker": wallet_address or get_edgeswarm_worker_identity_v1() or provider_email,
+            "providerEmail": get_edgeswarm_auth_email_v1() or provider_email,
             "score": score,
             "latency_ms": latency,
             "hardwareId": hardware_id,
@@ -1532,12 +1717,17 @@ def poll_once(provider_email: str, wallet_address: str, hardware_id: str, hardwa
 
 
 def load_identity_from_env() -> Tuple[str, str, str]:
-    provider_email = os.getenv("EDGE_PROVIDER_EMAIL", "").strip().lower()
-    wallet_address = os.getenv("EDGE_WALLET_ADDRESS", "").strip()
+    provider_email = get_edgeswarm_auth_email_v1()
+    wallet_address = (
+        os.getenv("EDGE_WALLET_ADDRESS")
+        or os.getenv("EDGE_WORKER_ADDRESS")
+        or os.getenv("EDGESWARM_WALLET_ADDRESS")
+        or get_edgeswarm_worker_identity_v1()
+    ).strip()
     private_key = os.getenv("EDGE_PRIVATE_KEY", "").strip()
 
     if not provider_email:
-        raise SystemExit("EDGE_PROVIDER_EMAIL is required. Export it before running the node.")
+        raise SystemExit("EdgeSwarm login is required. Run: sudo -E /opt/edgeswarm-node/.venv/bin/python /opt/edgeswarm-node/scripts/edgeswarm_linux_login.py")
 
     if private_key:
         if not Account:

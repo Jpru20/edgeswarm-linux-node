@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=EdgeSwarm Node
+Comment=EdgeSwarm Linux Node Dashboard
+Exec=/opt/edgeswarm-node/.venv/bin/python /opt/edgeswarm-node/edgeswarm_linux_ui.py
+Icon=utilities-system-monitor
+Terminal=false
+Type=Application
+Categories=Network;Utility;
+StartupNotify=true
