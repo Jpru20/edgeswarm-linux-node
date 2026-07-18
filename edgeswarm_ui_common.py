@@ -4,17 +4,43 @@ import os
 import subprocess
 from pathlib import Path
 
-APP_VERSION = "v0.1.3"
-CORE_VERSION = "v0.1.3"
-
 API_BASE = os.getenv("EDGESWARM_API_BASE", "https://api.edgeswarm.io")
 SERVICE_NAME = "edgeswarm-node"
 
 ENV_PATH = Path("/etc/edgeswarm-node.env")
 AUTH_PATH = Path("/etc/edgeswarm-node-auth.json")
 STATUS_PATH = Path("/var/lib/edgeswarm-node/ui_status.json")
+VERSION_PATH = Path("/opt/edgeswarm-node/VERSION")
 RELEASE_METADATA_PATH = Path("/opt/edgeswarm-node/RELEASE_METADATA.json")
 MODEL_DIR = Path("/var/lib/edgeswarm-node/models")
+
+
+def get_installed_version():
+    version = ""
+
+    try:
+        if VERSION_PATH.exists():
+            version = VERSION_PATH.read_text(errors="ignore").strip()
+    except Exception:
+        version = ""
+
+    if not version:
+        try:
+            metadata = json.loads(RELEASE_METADATA_PATH.read_text())
+            version = str(
+                metadata.get("appVersion")
+                or metadata.get("version")
+                or ""
+            ).strip()
+        except Exception:
+            version = ""
+
+    version = version.lstrip("v")
+    return f"v{version}" if version else "Unknown"
+
+
+APP_VERSION = get_installed_version()
+CORE_VERSION = APP_VERSION
 
 
 def load_env_file(path=ENV_PATH):

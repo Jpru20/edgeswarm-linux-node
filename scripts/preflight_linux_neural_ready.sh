@@ -1,18 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+PYTHON="${EDGESWARM_PYTHON:-$ROOT/.venv/bin/python}"
+
+if [[ ! -x "$PYTHON" ]]; then
+  echo "EdgeSwarm Python runtime missing: $PYTHON" >&2
+  exit 1
+fi
 
 echo "== Python compile check =="
-python3 -m py_compile edgeswarm_node.py edgeswarm_linux_neural.py
+"$PYTHON" -m py_compile edgeswarm_node.py edgeswarm_linux_neural.py
 
 echo ""
 echo "== Linux neural readiness =="
-python3 edgeswarm_linux_neural.py --json || python3 edgeswarm_linux_neural.py
+"$PYTHON" edgeswarm_linux_neural.py --json || "$PYTHON" edgeswarm_linux_neural.py
 
 echo ""
 echo "== Runtime availability =="
-python3 - <<'PY'
+"$PYTHON" - <<'PY'
 try:
     import llama_cpp
     print("llama_cpp: installed")
@@ -23,7 +31,7 @@ PY
 
 echo ""
 echo "== Active process_task safety =="
-python3 - <<'PY'
+"$PYTHON" - <<'PY'
 import inspect
 import edgeswarm_node
 
@@ -37,14 +45,14 @@ PY
 
 echo ""
 echo "== Capabilities with neural disabled =="
-python3 - <<'PY'
+"$PYTHON" - <<'PY'
 import edgeswarm_node
 print(edgeswarm_node.get_node_capabilities())
 PY
 
 echo ""
 echo "== Neural gate simulation =="
-python3 - <<'PY'
+"$PYTHON" - <<'PY'
 from edgeswarm_linux_neural import can_handle_linux_neural_task
 
 for required in ["Neural-Inference", "Neural-Inference-3B", "Neural-Inference-7B", "Neural-Inference-14B"]:

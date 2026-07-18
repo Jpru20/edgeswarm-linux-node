@@ -13,7 +13,12 @@ from pathlib import Path
 import requests
 
 API_BASE = os.getenv("GCP_BASE_URL", "https://api.edgeswarm.io").rstrip("/")
-MODEL_DIR = Path(os.getenv("EDGESWARM_MODEL_DIR", str(Path.home() / ".local/share/EdgeSwarm/models")))
+MODEL_DIR = Path(
+    os.getenv(
+        "EDGESWARM_MODEL_DIR",
+        "/var/lib/edgeswarm-node/models",
+    )
+).expanduser()
 
 
 def _float_or_none(value):
@@ -114,27 +119,91 @@ def fetch_recommendation():
     return {"payload": payload, "recommendation": data}
 
 
-def recommended_model_files(recommended_model):
+def select_recommended_artifact(recommended_model):
     model = recommended_model or {}
-    files = model.get("files")
 
-    if isinstance(files, list) and files:
-        return [f for f in files if isinstance(f, dict)]
+    files = [
+        dict(item)
+        for item in (model.get("files") or [])
+        if isinstance(item, dict)
+    ]
 
-    download_url = model.get("downloadUrl")
-    filename = model.get("filename") or os.path.basename(str(download_url or ""))
-    sha256_value = model.get("sha256")
+    if not files:
+        download_url = model.get("downloadUrl")
+        filename = (
+            model.get("filename")
+            or os.path.basename(str(download_url or ""))
+        )
 
-    if download_url and filename:
-        return [{
+        if download_url and filename:
+            files = [{
+                "modelId": model.get("id"),
+                "filename": filename,
+                "downloadUrl": download_url,
+                "sha256": model.get("sha256"),
+                "sizeGb": model.get("sizeGb"),
+            }]
+
+    if not files:
+        return {
             "modelId": model.get("id"),
-            "filename": filename,
-            "downloadUrl": download_url,
-            "sha256": sha256_value,
-            "sizeGb": model.get("sizeGb"),
-        }]
+            "capability": model.get("capability"),
+            "files": [],
+        }
 
-    return []
+    preferred_ids = []
+
+    if not model.get("pack") and model.get("id"):
+        preferred_ids.append(str(model.get("id")))
+
+    for key in (
+        "primaryModelIds",
+        "speedAltModelIds",
+        "fallbackModelIds",
+    ):
+        values = model.get(key)
+
+        if isinstance(values, list):
+            preferred_ids.extend(
+                str(value)
+                for value in values
+                if value
+            )
+
+    selected = None
+
+    for preferred_id in preferred_ids:
+        selected = next(
+            (
+                item
+                for item in files
+                if str(item.get("modelId") or "")
+                == preferred_id
+            ),
+            None,
+        )
+
+        if selected:
+            break
+
+    if selected is None:
+        selected = files[0]
+
+    return {
+        "modelId": (
+            selected.get("modelId")
+            or model.get("id")
+        ),
+        "capability": model.get("capability"),
+        "files": [selected],
+    }
+
+
+def recommended_model_files(recommended_model):
+    return select_recommended_artifact(
+        recommended_model
+    ).get("files", [])
+
 
 
 def sha256_file(path):
@@ -184,22 +253,39 @@ def verify_recommended():
     data = fetch_recommendation()
     recommendation = data["recommendation"]
     model = recommendation.get("recommendedModel") or {}
-    files = recommended_model_files(model)
+    selection = select_recommended_artifact(model)
+    files = selection.get("files") or []
 
     checks = []
 
-    for f in files:
-        filename = os.path.basename(str(f.get("filename") or ""))
-        checks.append(verify_file(MODEL_DIR / filename, f.get("sha256")))
+    for item in files:
+        filename = os.path.basename(
+            str(item.get("filename") or "")
+        )
+        checks.append(
+            verify_file(
+                MODEL_DIR / filename,
+                item.get("sha256"),
+            )
+        )
 
     return {
-        "ok": bool(checks) and all(c.get("ok") for c in checks),
-        "modelId": model.get("id"),
-        "capability": model.get("capability"),
-        "shouldDownload": recommendation.get("shouldDownload"),
+        "ok": (
+            bool(checks)
+            and all(check.get("ok") for check in checks)
+        ),
+        "modelId": selection.get("modelId"),
+        "capability": selection.get("capability"),
+        "shouldDownload": recommendation.get(
+            "shouldDownload"
+        ),
         "files": checks,
-        "recommendationReason": recommendation.get("nodeProfile", {}).get("recommendationReason"),
+        "recommendationReason": (
+            recommendation.get("nodeProfile", {})
+            .get("recommendationReason")
+        ),
     }
+
 
 
 def download_file(url, final_path, expected_sha256=None):
@@ -286,7 +372,8 @@ def download_recommended():
     data = fetch_recommendation()
     recommendation = data["recommendation"]
     model = recommendation.get("recommendedModel") or {}
-    files = recommended_model_files(model)
+    selection = select_recommended_artifact(model)
+    files = selection.get("files") or []
 
     if not files:
         return {
@@ -297,22 +384,33 @@ def download_recommended():
 
     results = []
 
-    for f in files:
-        filename = os.path.basename(str(f.get("filename") or ""))
-        url = f.get("downloadUrl")
-        sha = f.get("sha256")
+    for item in files:
+        filename = os.path.basename(
+            str(item.get("filename") or "")
+        )
+        url = item.get("downloadUrl")
+        sha = item.get("sha256")
 
         if not filename or not url:
-            raise RuntimeError(f"bad_file_entry:{f}")
+            raise RuntimeError(
+                f"bad_file_entry:{item}"
+            )
 
-        results.append(download_file(url, MODEL_DIR / filename, sha))
+        results.append(
+            download_file(
+                url,
+                MODEL_DIR / filename,
+                sha,
+            )
+        )
 
     return {
-        "ok": all(r.get("ok") for r in results),
-        "modelId": model.get("id"),
-        "capability": model.get("capability"),
+        "ok": all(result.get("ok") for result in results),
+        "modelId": selection.get("modelId"),
+        "capability": selection.get("capability"),
         "files": results,
     }
+
 
 
 def _extract_json_from_output(output):
@@ -342,8 +440,13 @@ def smoke_model(model_id):
 
 def smoke_recommended():
     data = fetch_recommendation()
-    model = (data.get("recommendation") or {}).get("recommendedModel") or {}
-    model_id = model.get("id")
+    model = (
+        (data.get("recommendation") or {})
+        .get("recommendedModel")
+        or {}
+    )
+    selection = select_recommended_artifact(model)
+    model_id = selection.get("modelId")
 
     if not model_id:
         return {
@@ -355,10 +458,14 @@ def smoke_recommended():
     result = smoke_model(model_id)
 
     return {
-        "ok": bool(result.get("ok")) and bool(result.get("smokePassed")),
+        "ok": (
+            bool(result.get("ok"))
+            and bool(result.get("smokePassed"))
+        ),
         "modelId": model_id,
         "smoke": result,
     }
+
 
 
 def full_setup():

@@ -55,7 +55,7 @@ def main():
         json.dump(data, f, indent=2)
 
     shutil.chown(tmp, user="root", group="edgeswarm")
-    os.chmod(tmp, 0o640)
+    os.chmod(tmp, 0o660)
     tmp.replace(AUTH_PATH)
 
     STATUS_DIR.mkdir(parents=True, exist_ok=True)
@@ -80,7 +80,31 @@ def main():
     shutil.chown(STATUS_PATH, user="edgeswarm", group="edgeswarm")
     os.chmod(STATUS_PATH, 0o644)
 
-    subprocess.run(["systemctl", "restart", "edgeswarm-node"], check=False)
+    service_result = subprocess.run(
+        [
+            "systemctl",
+            "enable",
+            "--now",
+            "edgeswarm-node.service",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    if service_result.returncode != 0:
+        error_text = (
+            service_result.stderr
+            or service_result.stdout
+            or "unknown systemctl error"
+        ).strip()
+
+        print(json.dumps({
+            "ok": False,
+            "error": "service_enable_start_failed",
+            "detail": error_text,
+        }))
+        raise SystemExit(1)
 
     print(json.dumps({
         "ok": True,

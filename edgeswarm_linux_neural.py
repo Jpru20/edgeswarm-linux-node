@@ -15,9 +15,19 @@ from typing import Any, Dict, List, Optional, Tuple
 
 EDGE_SWARM_LINUX_NEURAL_READINESS_VERSION = "linux_neural_readiness_v1"
 
-XDG_DATA_HOME = Path(os.getenv("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+XDG_DATA_HOME = Path(
+    os.getenv(
+        "XDG_DATA_HOME",
+        Path.home() / ".local" / "share",
+    )
+)
 APP_SUPPORT_DIR = XDG_DATA_HOME / "EdgeSwarm"
-MODEL_DIR = APP_SUPPORT_DIR / "models"
+MODEL_DIR = Path(
+    os.getenv(
+        "EDGESWARM_MODEL_DIR",
+        "/var/lib/edgeswarm-node/models",
+    )
+).expanduser()
 SMOKE_DIR = APP_SUPPORT_DIR / "model_smoke_tests"
 
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -466,6 +476,7 @@ def run_local_linux_neural_inference(
         }
 
     model_path = find_local_model_file(selected)
+
     if not model_path:
         return {
             "ok": False,
@@ -474,6 +485,7 @@ def run_local_linux_neural_inference(
         }
 
     Llama, import_error = _import_llama_cpp()
+
     if Llama is None:
         return {
             "ok": False,
@@ -486,11 +498,62 @@ def run_local_linux_neural_inference(
 
     n_gpu_layers = -1 if profile.get("cudaAvailable") else 0
     n_threads = max(2, min(16, os.cpu_count() or 2))
-    max_tokens = int(max_tokens or spec.get("defaultMaxTokens", 256))
+
+    raw_prompt = str(prompt or "").strip()
+    system_text = (
+        "Answer the user directly and follow their requested "
+        "format and length."
+    )
+    user_text = raw_prompt
+
+    prefix = "prompt://SYSTEM:"
+    user_marker = "\n\nUSER:"
+    strict_marker = "\n\n[STRICT_PLAIN_TEXT_MODE_V3]"
+
+    if raw_prompt.startswith(prefix):
+        compiled = raw_prompt[len(prefix):].strip()
+
+        if user_marker in compiled:
+            system_text, user_text = compiled.split(
+                user_marker,
+                1,
+            )
+
+            system_text = system_text.strip()
+            user_text = user_text.strip()
+
+            if strict_marker in user_text:
+                user_text = user_text.split(
+                    strict_marker,
+                    1,
+                )[0].strip()
+
+    requested_max = int(
+        max_tokens
+        or spec.get("defaultMaxTokens", 256)
+    )
+
+    concise_request = any(
+        phrase in user_text.lower()
+        for phrase in (
+            "one concise sentence",
+            "one sentence",
+            "single sentence",
+        )
+    )
+
+    if concise_request:
+        requested_max = min(requested_max, 64)
+    else:
+        requested_max = min(requested_max, 256)
+
+    requested_max = max(16, requested_max)
 
     started = time.time()
 
     try:
+        load_started = time.time()
+
         llm = Llama(
             model_path=str(model_path),
             n_ctx=int(spec.get("defaultCtx", 2048)),
@@ -499,12 +562,65 @@ def run_local_linux_neural_inference(
             verbose=False,
         )
 
-        result = llm(prompt, max_tokens=max_tokens, temperature=0.2)
+        model_load_ms = int(
+            (time.time() - load_started) * 1000
+        )
+
+        generation_started = time.time()
+
+        result = llm.create_chat_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_text,
+                },
+                {
+                    "role": "user",
+                    "content": user_text,
+                },
+            ],
+            max_tokens=requested_max,
+            temperature=0.1,
+            top_p=0.9,
+            stop=[
+                "<|im_end|>",
+                "<|endoftext|>",
+            ],
+        )
+
+        generation_ms = int(
+            (time.time() - generation_started) * 1000
+        )
 
         try:
-            response_text = result["choices"][0]["text"].strip()
+            response_text = str(
+                result["choices"][0]["message"]["content"]
+                or ""
+            ).strip()
         except Exception:
-            response_text = str(result)
+            response_text = str(result).strip()
+
+        usage = (
+            result.get("usage")
+            if isinstance(result, dict)
+            else {}
+        ) or {}
+
+        input_tokens = int(
+            usage.get("prompt_tokens") or 0
+        )
+
+        output_tokens = int(
+            usage.get("completion_tokens") or 0
+        )
+
+        tokens_per_second = None
+
+        if output_tokens > 0 and generation_ms > 0:
+            tokens_per_second = round(
+                output_tokens / (generation_ms / 1000),
+                3,
+            )
 
         return {
             "ok": True,
@@ -514,8 +630,22 @@ def run_local_linux_neural_inference(
             "requiredModel": required_model,
             "modelPath": str(model_path),
             "runtime": "llama.cpp",
-            "runtimeAcceleration": "cuda" if profile.get("cudaAvailable") else "cpu",
-            "latencyMs": int((time.time() - started) * 1000),
+            "runtimeAcceleration": (
+                "cuda"
+                if profile.get("cudaAvailable")
+                else "cpu"
+            ),
+            "latencyMs": int(
+                (time.time() - started) * 1000
+            ),
+            "modelLoadMs": model_load_ms,
+            "generationMs": generation_ms,
+            "inputTokens": input_tokens,
+            "outputTokens": output_tokens,
+            "tokensGenerated": output_tokens,
+            "tokensPerSecond": tokens_per_second,
+            "maxTokens": requested_max,
+            "modelWarm": False,
         }
 
     except Exception as exc:
@@ -524,8 +654,8 @@ def run_local_linux_neural_inference(
             "error": "local_neural_inference_failed",
             "details": str(exc)[:500],
             "selectedModel": selected,
-            "requiredModel": required_model,
         }
+
 
 
 

@@ -1,0 +1,125 @@
+{
+  "manifestVersion": "edgeswarm_linux_package_manifest_v1",
+  "platform": "linux",
+  "architecture": "x64",
+  "version": "0.1.5",
+  "releaseChannel": "public_beta",
+  "packageType": "tar.gz",
+  "publicReleaseSafe": true,
+  "runtimeSha256": "0a9b6515c5c11db2e705eb12d0ba5485b50760f635632b2dce975b4c262dfea5",
+  "neuralModuleSha256": "6c1103a2ab9bf7707511ccc4fcd83dacfbc5faf57c4a77b9b7b86b936d17d9b6",
+  "files": {
+    ".gitignore": {
+      "sha256": "2f56ddccf19eaae80c529ec98879c5eed702b2651d0f01e584a757ad879d0a52",
+      "sizeBytes": 85
+    },
+    "README.md": {
+      "sha256": "7fc8332444915085e67b5877ea10e282a4c7c048cda1049634ef38f5294140a8",
+      "sizeBytes": 566
+    },
+    "RELEASE_METADATA.json": {
+      "sha256": "3af5b7ddad5207c1ec0ca150b249cff00025e9357bed3882ba790f07bc17b330",
+      "sizeBytes": 538
+    },
+    "VERSION": {
+      "sha256": "800cf1c0392b24de7c0a1c6ea6778ecb433dec71c49a150bce96a98477527b2f",
+      "sizeBytes": 6
+    },
+    "desktop/edgeswarm-node.desktop": {
+      "sha256": "514bf3bc202fe5b66b41ebd45e65b27f7eb8ffcaca5604a11e5903d674e135e9",
+      "sizeBytes": 268
+    },
+    "edgeswarm-node.env.example": {
+      "sha256": "2680507d132c5ec5171c134897fc8978bf1feda809f58fd6d53ff9e6d5df307d",
+      "sizeBytes": 324
+    },
+    "edgeswarm_linux_neural.py": {
+      "sha256": "6c1103a2ab9bf7707511ccc4fcd83dacfbc5faf57c4a77b9b7b86b936d17d9b6",
+      "sizeBytes": 25206
+    },
+    "edgeswarm_linux_ui.py": {
+      "sha256": "25ec81f0d0f86d98103138f741938ac2aa3fcc137a6c511536d10fa070ed83b6",
+      "sizeBytes": 1976
+    },
+    "edgeswarm_model_provisioner.py": {
+      "sha256": "a6abff57e0d3590ae59a373e2bf9743c49c331c82bef0e3b576e7427f01bc83d",
+      "sizeBytes": 14626
+    },
+    "edgeswarm_node.py": {
+      "sha256": "0a9b6515c5c11db2e705eb12d0ba5485b50760f635632b2dce975b4c262dfea5",
+      "sizeBytes": 72417
+    },
+    "edgeswarm_ui_auth.py": {
+      "sha256": "5b3d1b30469b565b94746ab1b725d2bc24a0924bd5b31c504943f80faabb9e63",
+      "sizeBytes": 6858
+    },
+    "edgeswarm_ui_common.py": {
+      "sha256": "8b2b0088f57322fedfb23d18ac6f4aaf79c4d91f4d0dfc9f143ba768d190ea7b",
+      "sizeBytes": 4716
+    },
+    "edgeswarm_ui_dashboard.py": {
+      "sha256": "75a95d4e7eb9eeb4a15e6a4ed54f5f880f0b2575bac1324a40b9f555a56c2625",
+      "sizeBytes": 12051
+    },
+    "edgeswarm_ui_login.py": {
+      "sha256": "831407f05913cb2d43e4be3e170f93199a5213e9899faecfc6bb86b2081716cd",
+      "sizeBytes": 5855
+    },
+    "edgeswarm_wallet_vault.py": {
+      "sha256": "95edb409d88f31d878aa4bd896faa480825d8603b6acad81dd2f5146335d050e",
+      "sizeBytes": 4212
+    },
+    "install.sh": {
+      "sha256": "08616187f3661a8d03772a45c0629296e88f6693ca0c734d0c757113dedc29d2",
+      "sizeBytes": 8254
+    },
+    "requirements.txt": {
+      "sha256": "cc8ee3d046bc35ba38bebba7ceb97ccabfaab3e10059bb693637f389742d8040",
+      "sizeBytes": 113
+    },
+    "scripts/build_linux_neural_ready_package.sh": {
+      "sha256": "939627279605567ee2fc3f2ddc87c71bc5948f23975773b793f443eeb88ba195",
+      "sizeBytes": 7627
+    },
+    "scripts/edgeswarm_cli.sh": {
+      "sha256": "f2c35d26920571f5fe67efce59e2ea36894b43ec39e92a89f389ccb7d0c6039a",
+      "sizeBytes": 3418
+    },
+    "scripts/edgeswarm_linux_auto_update.py": {
+      "sha256": "41a54db45bc7b7f1578738b745e29eaeddbc582dc3c2f0de36f840b62d540c23",
+      "sizeBytes": 7961
+    },
+    "scripts/edgeswarm_linux_install_auth.py": {
+      "sha256": "54eb14bf9d38d8cbf614c9069fb73ed2149d0a7cf421d9027fec2fb2b49a2ff4",
+      "sizeBytes": 2966
+    },
+    "scripts/edgeswarm_linux_login.py": {
+      "sha256": "8c50afb26ff4cfab38a55003ba6206282100f4c612e3c86c0c698f6b3987f906",
+      "sizeBytes": 5228
+    },
+    "scripts/edgeswarm_linux_release_metadata.py": {
+      "sha256": "460e7dbdfa03fd1124d56600ba3023edc65e8770c43fa0b7921b4d1360fe469d",
+      "sizeBytes": 3710
+    },
+    "scripts/install_linux_neural_runtime.sh": {
+      "sha256": "228ea573b07a8e7c865612c5f0058d63101422146500d3222175278f80a476b6",
+      "sizeBytes": 682
+    },
+    "scripts/preflight_linux_neural_ready.sh": {
+      "sha256": "bada554e89d66b508b73154dd5b79e24d6ae86c5a5b17ab2d2dee75de8ae6f35",
+      "sizeBytes": 1626
+    },
+    "systemd/edgeswarm-node-updater.service.example": {
+      "sha256": "c7a877957d1350077250fb06eb9d291fe7819cc26bda3cf9d6dabe37f2c5ec8a",
+      "sizeBytes": 314
+    },
+    "systemd/edgeswarm-node-updater.timer.example": {
+      "sha256": "e985de08c16bd2b87c2685bfe1964c16d6c22df2fd794ea315388336c531a782",
+      "sizeBytes": 153
+    },
+    "systemd/edgeswarm-node.service.example": {
+      "sha256": "818eb5ce8726c5a75361917eaa7cc3a5109ab253de3736aca00705db69131bf8",
+      "sizeBytes": 380
+    }
+  }
+}

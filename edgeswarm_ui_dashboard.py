@@ -263,8 +263,17 @@ class DashboardFrame(ctk.CTkFrame):
         self.row(self.left_panel, "Hardware ID:", short_middle(hardware, 14, 6))
         self.row(self.left_panel, "Platform:", "linux x64")
 
-        release_channel = release.get("releaseChannel") or "public_beta"
-        mode = f"Public beta | {model['level'].replace(' Node', '')} rewards enabled | neural={'true' if model.get('neural') else 'false'}"
+        release_channel = str(
+            release.get("releaseChannel") or "unknown"
+        ).strip()
+
+        release_label = release_channel.replace("_", " ").title()
+
+        mode = (
+            f"{release_label} | "
+            f"{model['level'].replace(' Node', '')} rewards enabled | "
+            f"neural={'true' if model.get('neural') else 'false'}"
+        )
 
         self.row(self.right_panel, "Desktop Version:", APP_VERSION)
         self.row(self.right_panel, "Core Version:", CORE_VERSION)
@@ -362,7 +371,7 @@ class DashboardFrame(ctk.CTkFrame):
             pkexec([
                 "bash",
                 "-lc",
-                f"rm -f {AUTH_PATH} {STATUS_PATH}; systemctl stop {SERVICE_NAME}",
+                f"rm -f {AUTH_PATH} {STATUS_PATH}; systemctl disable --now {SERVICE_NAME}",
             ], timeout=60)
             try:
                 if USER_CACHE_PATH.exists():

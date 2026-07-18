@@ -40,18 +40,67 @@ def current_arch():
     return machine or "unknown"
 
 
+def version_key(value):
+    parts = []
+
+    for piece in str(value or "").strip().lstrip("v").split("."):
+        digits = "".join(ch for ch in piece if ch.isdigit())
+        parts.append(int(digits or 0))
+
+    while len(parts) < 3:
+        parts.append(0)
+
+    return tuple(parts[:3])
+
+
 def read_current_version(install_dir):
-    env_version = os.environ.get("EDGESWARM_NODE_VERSION", "").strip().lstrip("v")
+    candidates = []
+
+    env_version = os.environ.get(
+        "EDGESWARM_NODE_VERSION",
+        "",
+    ).strip().lstrip("v")
+
     if env_version:
-        return env_version
+        candidates.append(env_version)
 
     version_file = Path(install_dir) / "VERSION"
-    if version_file.exists():
-        version = version_file.read_text(errors="ignore").strip().lstrip("v")
-        if version:
-            return version
 
-    return "0.0.0"
+    if version_file.exists():
+        version = (
+            version_file.read_text(errors="ignore")
+            .strip()
+            .lstrip("v")
+        )
+
+        if version:
+            candidates.append(version)
+
+    runtime_file = Path(install_dir) / "edgeswarm_node.py"
+
+    if runtime_file.exists():
+        for line in runtime_file.read_text(
+            errors="ignore"
+        ).splitlines():
+            stripped = line.strip()
+
+            if stripped.startswith("APP_VERSION") and "=" in stripped:
+                runtime_version = (
+                    stripped.split("=", 1)[1]
+                    .strip()
+                    .strip("'\"")
+                    .lstrip("v")
+                )
+
+                if runtime_version:
+                    candidates.append(runtime_version)
+
+                break
+
+    if not candidates:
+        return "0.0.0"
+
+    return max(candidates, key=version_key)
 
 
 def fetch_json(url):
@@ -153,6 +202,16 @@ def main():
         "publicReleaseSafe": manifest.get("publicReleaseSafe"),
         "releaseChannel": manifest.get("releaseChannel"),
     }, indent=2))
+
+    if (
+        latest_version
+        and version_key(latest_version) <= version_key(current_version)
+    ):
+        print(
+            "[edgeswarm-updater] refusing equal-version "
+            "install or downgrade"
+        )
+        return 0
 
     if not update_available:
         print("[edgeswarm-updater] no update available")

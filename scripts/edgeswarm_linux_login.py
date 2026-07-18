@@ -2,12 +2,17 @@
 import getpass
 import json
 import os
+import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 from supabase import create_client
 
 DEFAULT_AUTH_FILE = "/etc/edgeswarm-node-auth.json"
+STATUS_DIR = Path("/var/lib/edgeswarm-node")
+STATUS_PATH = STATUS_DIR / "ui_status.json"
 
 SUPABASE_URL = os.getenv("SUPABASE_URL") or os.getenv("EDGESWARM_SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY") or os.getenv("EDGESWARM_SUPABASE_ANON_KEY")
@@ -23,6 +28,41 @@ def obj_get(obj, key, default=None):
     if isinstance(obj, dict):
         return obj.get(key, default)
     return getattr(obj, key, default)
+
+
+def write_ui_status(provider_email: str, mfa_verified: bool = True) -> None:
+    STATUS_DIR.mkdir(parents=True, exist_ok=True)
+
+    status = {}
+
+    if STATUS_PATH.exists():
+        try:
+            status = json.loads(
+                STATUS_PATH.read_text(encoding="utf-8")
+            )
+        except Exception:
+            status = {}
+
+    status.update({
+        "providerEmail": provider_email,
+        "authInstalled": True,
+        "mfaVerified": bool(mfa_verified),
+        "lastAuthInstall": int(time.time()),
+    })
+
+    temp_status = STATUS_PATH.with_suffix(".json.tmp")
+    temp_status.write_text(
+        json.dumps(status, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    shutil.chown(
+        temp_status,
+        user="edgeswarm",
+        group="edgeswarm",
+    )
+    os.chmod(temp_status, 0o644)
+    temp_status.replace(STATUS_PATH)
 
 
 def main():
@@ -93,12 +133,61 @@ def main():
         "mfaVerified": True
     }
 
+    if os.geteuid() != 0:
+        print(
+            "Headless login must be run with sudo so the node service "
+            "can securely access the auth session.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
     auth_file.parent.mkdir(parents=True, exist_ok=True)
-    auth_file.write_text(json.dumps(data, indent=2) + "\n")
-    os.chmod(auth_file, 0o600)
+
+    temp_auth = auth_file.with_suffix(".json.tmp")
+    temp_auth.write_text(json.dumps(data, indent=2) + "\n")
+
+    shutil.chown(
+        temp_auth,
+        user="root",
+        group="edgeswarm",
+    )
+    os.chmod(temp_auth, 0o660)
+    temp_auth.replace(auth_file)
+
+    write_ui_status(
+        provider_email=email,
+        mfa_verified=True,
+    )
+
+    service_result = subprocess.run(
+        [
+            "systemctl",
+            "enable",
+            "--now",
+            "edgeswarm-node.service",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    if service_result.returncode != 0:
+        error_text = (
+            service_result.stderr
+            or service_result.stdout
+            or "unknown systemctl error"
+        ).strip()
+
+        print(
+            "Authentication succeeded, but the node service "
+            f"could not be enabled and started: {error_text}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
 
     print(f"Login complete. Auth saved to {auth_file}")
     print(f"Provider email: {email}")
+    print("Node service enabled and started.")
 
 
 if __name__ == "__main__":

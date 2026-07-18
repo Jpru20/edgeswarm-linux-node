@@ -3,3 +3,4 @@ psutil>=5.9.0
 llama-cpp-python>=0.2.90
 supabase>=2.6.0
 customtkinter>=5.2.2
+eth-account==0.13.7

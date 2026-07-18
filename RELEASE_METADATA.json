@@ -1,0 +1,18 @@
+{
+  "releaseMetadataVersion": "linux_release_metadata_v1",
+  "platform": "linux",
+  "version": "0.1.5",
+  "releaseChannel": "public_beta",
+  "packageType": "tar.gz",
+  "packageSha256": "",
+  "downloadUrl": "",
+  "manifestSha256": "",
+  "hashRecognized": false,
+  "hashStatus": "public_beta_package_pending_publish",
+  "publicReleaseSafe": true,
+  "signatureType": "unsigned_public_beta",
+  "signerStatus": "unsigned_public_beta",
+  "writtenAt": 1784278391,
+  "appVersion": "0.1.5",
+  "notes": "Linux v0.1.5 public beta tar.gz package."
+}

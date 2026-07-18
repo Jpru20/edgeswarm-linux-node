@@ -61,7 +61,7 @@ except Exception:
     encode_defunct = None
 
 
-APP_VERSION = "0.1.3"
+APP_VERSION = "0.1.5"
 
 # EDGE_SWARM_LINUX_AUTH_HEADERS_COMPAT_V1
 
@@ -93,6 +93,107 @@ def load_edgeswarm_auth_session_v1() -> dict:
     return {}
 
 
+# LINUX_UNATTENDED_AUTH_REFRESH_V3
+def edgeswarm_refresh_auth_session_v1(auth: dict = None) -> dict:
+    auth = (
+        auth
+        if isinstance(auth, dict)
+        else load_edgeswarm_auth_session_v1()
+    )
+
+    refresh_token = str(
+        auth.get("refreshToken") or ""
+    ).strip()
+
+    supabase_url = str(
+        os.getenv("SUPABASE_URL")
+        or os.getenv("EDGESWARM_SUPABASE_URL")
+        or ""
+    ).rstrip("/")
+
+    supabase_key = str(
+        os.getenv("SUPABASE_ANON_KEY")
+        or os.getenv("EDGESWARM_SUPABASE_ANON_KEY")
+        or ""
+    ).strip()
+
+    if not refresh_token or not supabase_url or not supabase_key:
+        return {}
+
+    try:
+        response = requests.post(
+            (
+                f"{supabase_url}/auth/v1/token"
+                "?grant_type=refresh_token"
+            ),
+            headers={
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+                "Content-Type": "application/json",
+            },
+            json={"refresh_token": refresh_token},
+            timeout=20,
+        )
+
+        if response.status_code != 200:
+            log(
+                "[AUTH] Session refresh failed: "
+                f"HTTP {response.status_code} "
+                f"{response.text[:250]}"
+            )
+            return {}
+
+        data = response.json()
+
+        access_token = str(
+            data.get("access_token") or ""
+        ).strip()
+
+        next_refresh_token = str(
+            data.get("refresh_token")
+            or refresh_token
+        ).strip()
+
+        if not access_token or not next_refresh_token:
+            return {}
+
+        auth["accessToken"] = access_token
+        auth["refreshToken"] = next_refresh_token
+        auth["expiresAt"] = (
+            int(time.time())
+            + int(data.get("expires_in") or 3600)
+        )
+        auth["lastRefreshAt"] = int(time.time())
+        auth["refreshedAt"] = int(time.time())
+        auth["mfaVerified"] = True
+        auth["explicitShutdown"] = False
+
+        _edgeswarm_save_auth_session_v1(auth)
+
+        log("[AUTH] Session refreshed successfully.")
+        return auth
+
+    except Exception as exc:
+        log(f"[AUTH] Session refresh failed: {exc}")
+        return {}
+
+
+def ensure_edgeswarm_auth_session_v1(auth: dict = None) -> dict:
+    auth = (
+        auth
+        if isinstance(auth, dict)
+        else load_edgeswarm_auth_session_v1()
+    )
+
+    if is_edgeswarm_auth_session_valid_v1(auth):
+        return auth
+
+    if auth.get("mfaVerified") is not True:
+        return {}
+
+    return edgeswarm_refresh_auth_session_v1(auth)
+
+
 def get_edgeswarm_auth_email_v1() -> str:
     auth = load_edgeswarm_auth_session_v1()
     email = str(auth.get("providerEmail") or auth.get("email") or "").strip().lower()
@@ -107,14 +208,41 @@ def get_edgeswarm_auth_email_v1() -> str:
 
 
 def get_edgeswarm_auth_token_v1() -> str:
-    auth = load_edgeswarm_auth_session_v1()
+    auth = ensure_edgeswarm_auth_session_v1()
     return str(auth.get("accessToken") or "").strip()
 
 
+def is_edgeswarm_auth_session_valid_v1(auth: dict = None) -> bool:
+    auth = auth if isinstance(auth, dict) else load_edgeswarm_auth_session_v1()
+
+    if not auth:
+        return False
+
+    if auth.get("mfaVerified") is not True:
+        return False
+
+    if not str(auth.get("accessToken") or "").strip():
+        return False
+
+    expires_at = int(auth.get("expiresAt") or 0)
+    if expires_at and expires_at <= int(time.time()) + 60:
+        return False
+
+    return True
+
+
 def get_edgeswarm_worker_identity_v1() -> str:
-    # For Linux public beta auth mode, worker identity is the authenticated email.
-    # Wallet sync can be added later, but this keeps Linux aligned with login/MFA first.
-    return get_edgeswarm_auth_email_v1()
+    auth = load_edgeswarm_auth_session_v1()
+    wallet = (
+        os.getenv("EDGE_WALLET_ADDRESS")
+        or os.getenv("EDGE_WORKER_ADDRESS")
+        or os.getenv("EDGESWARM_WALLET_ADDRESS")
+        or auth.get("walletAddress")
+        or auth.get("wallet_address")
+        or auth.get("worker")
+        or ""
+    )
+    return str(wallet).strip()
 
 
 
@@ -128,7 +256,31 @@ def build_auth_headers() -> dict:
 
 
 def sign_result(task_id, score, file_hash, hardware_id, private_key=None) -> str:
-    return "0xAuthBypass"
+    if not private_key:
+        raise ValueError(
+            "Linux result signing requires the device private key."
+        )
+
+    from eth_account import Account
+    from eth_account.messages import encode_defunct
+
+    message = (
+        f"Task:{task_id}|Score:{score}|"
+        f"Hash:{file_hash}|HW:{hardware_id}"
+    )
+
+    signed = Account.sign_message(
+        encode_defunct(text=message),
+        private_key=private_key,
+    )
+
+    signature = signed.signature.hex()
+
+    return (
+        signature
+        if signature.startswith("0x")
+        else "0x" + signature
+    )
 
 GCP_BASE_URL = os.getenv("GCP_BASE_URL", "https://api.edgeswarm.io").rstrip("/")
 GCP_GET_JOBS_URL = f"{GCP_BASE_URL}/swarm/get-jobs"
@@ -422,7 +574,8 @@ def collect_linux_profile() -> Dict[str, Any]:
         "gpuMemoryMb": gpu_memory_mb,
         "cudaAvailable": cuda_available,
         "metalAvailable": False,
-        "rawStableLocalId": f"{machine_id}|{dmi_uuid}|{cpu_name}",
+        # LINUX_MACHINE_ID_RUNTIME_USER_PARITY_V1
+        "rawStableLocalId": f"{machine_id}|{cpu_name}",
     }
 
 
@@ -461,7 +614,7 @@ def get_hardware_id(provider_email: str, wallet_address: str, hardware_profile: 
     Stable but privacy-preserving.
     Raw machine identifiers remain local and are never sent directly.
     """
-    salt = f"{provider_email or ''}|{wallet_address or ''}".lower().strip()
+    # LINUX_MACHINE_ONLY_HARDWARE_ID_V1
     material = json.dumps(
         {
             "osType": hardware_profile.get("osType"),
@@ -470,7 +623,7 @@ def get_hardware_id(provider_email: str, wallet_address: str, hardware_profile: 
         },
         sort_keys=True,
     )
-    return hashlib.sha256(f"{salt}|{material}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def get_runtime_path() -> str:
@@ -762,7 +915,9 @@ def process_linux_neural_task_v1(task, provider_email, wallet_address, hardware_
         "fileHash": file_hash,
         "payload": {
             "taskId": task_id,
-            "worker": wallet_address or get_edgeswarm_worker_identity_v1() or provider_email,
+            "wallet_address": wallet_address,
+          "walletAddress": wallet_address,
+          "worker": wallet_address,
             "providerEmail": get_edgeswarm_auth_email_v1() or provider_email,
             "score": score,
             "latency_ms": latency,
@@ -778,6 +933,22 @@ def process_linux_neural_task_v1(task, provider_email, wallet_address, hardware_
             "runtime": runtime,
             "runtime_acceleration": runtime_acceleration,
             "runtimeAcceleration": runtime_acceleration,
+            "model_warm": neural_result.get("modelWarm"),
+            "modelWarm": neural_result.get("modelWarm"),
+            "model_load_ms": neural_result.get("modelLoadMs"),
+            "modelLoadMs": neural_result.get("modelLoadMs"),
+            "generation_ms": neural_result.get("generationMs"),
+            "generationMs": neural_result.get("generationMs"),
+            "input_tokens": neural_result.get("inputTokens", 0),
+            "inputTokens": neural_result.get("inputTokens", 0),
+            "output_tokens": neural_result.get("outputTokens", 0),
+            "outputTokens": neural_result.get("outputTokens", 0),
+            "tokens_generated": neural_result.get("tokensGenerated", 0),
+            "tokensGenerated": neural_result.get("tokensGenerated", 0),
+            "tokens_per_second": neural_result.get("tokensPerSecond"),
+            "tokensPerSecond": neural_result.get("tokensPerSecond"),
+            "max_tokens": neural_result.get("maxTokens"),
+            "maxTokens": neural_result.get("maxTokens"),
         },
     }
 
@@ -847,6 +1018,9 @@ def send_heartbeat(
     current_task_ids: Optional[List[Any]] = None,
     status: str = "online",
 ) -> bool:
+    capabilities = get_node_capabilities()
+    eligible_model_capabilities = list(capabilities)
+
     # EDGESWARM_LINUX_NEURAL_HEARTBEAT_PATCH_V1
     _neural_adv = detect_installed_neural_model_v1()
     if _neural_adv.get("ready"):
@@ -881,6 +1055,9 @@ def send_heartbeat(
         "publicReleaseSafe": bool(load_linux_release_metadata_v1().get("publicReleaseSafe")),
         "hashStatus": "local_runtime_hash_only",
         trust_key: trust_profile,
+        "wallet_address": wallet_address or None,
+        "walletAddress": wallet_address or None,
+        "worker": wallet_address or None,
     }
 
     # EDGESWARM_GENERIC_NEURAL_CAPABILITY_PATCH_V1
@@ -890,7 +1067,9 @@ def send_heartbeat(
 
     payload = {
         "hardwareId": hardware_id,
-        "worker": wallet_address or get_edgeswarm_worker_identity_v1() or provider_email,
+        "wallet_address": wallet_address,
+          "walletAddress": wallet_address,
+          "worker": wallet_address,
         "providerEmail": get_edgeswarm_auth_email_v1() or provider_email,
         "nodeType": NODE_TYPE,
         "appType": APP_TYPE,
@@ -1586,7 +1765,31 @@ def run_web_scraper(prompt: Any) -> Tuple[str, int]:
 
 
 def sign_result(task_id, score, file_hash, hardware_id, private_key=None) -> str:
-    return "0xAuthBypass"
+    if not private_key:
+        raise ValueError(
+            "Linux result signing requires the device private key."
+        )
+
+    from eth_account import Account
+    from eth_account.messages import encode_defunct
+
+    message = (
+        f"Task:{task_id}|Score:{score}|"
+        f"Hash:{file_hash}|HW:{hardware_id}"
+    )
+
+    signed = Account.sign_message(
+        encode_defunct(text=message),
+        private_key=private_key,
+    )
+
+    signature = signed.signature.hex()
+
+    return (
+        signature
+        if signature.startswith("0x")
+        else "0x" + signature
+    )
 
 def process_task(
     task: Dict[str, Any],
@@ -1666,7 +1869,9 @@ def process_task(
         "fileHash": file_hash,
         "payload": {
             "taskId": task_id,
-            "worker": wallet_address or get_edgeswarm_worker_identity_v1() or provider_email,
+            "wallet_address": wallet_address,
+          "walletAddress": wallet_address,
+          "worker": wallet_address,
             "providerEmail": get_edgeswarm_auth_email_v1() or provider_email,
             "score": score,
             "latency_ms": latency,
@@ -1681,7 +1886,7 @@ def process_task(
     }
 
     log(f"[SUBMIT] Task ID: {task_id} | model_id_used={model_id_used} | output={ai_output[:200]}")
-    res = requests.post(GCP_UPLOAD_URL, json=payload, timeout=20)
+    res = requests.post(GCP_UPLOAD_URL, json=payload, headers=build_auth_headers(), timeout=20)
     log(f"[SUBMIT] HTTP {res.status_code} {res.text[:500]}")
     log(f"[TASK END] Task ID: {task_id}")
 
@@ -1691,7 +1896,10 @@ def process_task(
 def poll_once(provider_email: str, wallet_address: str, hardware_id: str, hardware_profile: Dict[str, Any]) -> List[Dict[str, Any]]:
     params = {
         "hardwareId": hardware_id,
-        "worker": provider_email,
+        "wallet_address": wallet_address,
+        "walletAddress": wallet_address,
+        "worker": wallet_address,
+        "providerEmail": provider_email,
         "capabilities": ",".join(get_node_capabilities()),
         "limit": POLL_LIMIT,
         "version": APP_VERSION,
@@ -1716,28 +1924,139 @@ def poll_once(provider_email: str, wallet_address: str, hardware_id: str, hardwa
     return [task for task in tasks if isinstance(task, dict)]
 
 
-def load_identity_from_env() -> Tuple[str, str, str]:
-    provider_email = get_edgeswarm_auth_email_v1()
+
+def _edgeswarm_auth_file_path_v1() -> str:
+    return os.getenv("EDGESWARM_AUTH_FILE", "/etc/edgeswarm-node-auth.json")
+
+
+def _edgeswarm_save_auth_session_v1(auth: dict) -> None:
+    auth_file = _edgeswarm_auth_file_path_v1()
+
+    with open(auth_file, "w", encoding="utf-8") as f:
+        json.dump(auth, f, indent=2)
+
+
+def _edgeswarm_is_wallet_address_v1(value: str) -> bool:
+    value = str(value or "").strip()
+    return value.startswith("0x") and len(value) == 42
+
+
+def _edgeswarm_load_or_create_linux_wallet_v1(provider_email: str) -> Tuple[str, str]:
+    auth = load_edgeswarm_auth_session_v1()
+
+    private_key = (
+        os.getenv("EDGE_PRIVATE_KEY")
+        or os.getenv("EDGESWARM_PRIVATE_KEY")
+        or auth.get("nodeWalletPrivateKey")
+        or auth.get("walletPrivateKey")
+        or auth.get("privateKey")
+        or ""
+    ).strip()
+
     wallet_address = (
         os.getenv("EDGE_WALLET_ADDRESS")
         or os.getenv("EDGE_WORKER_ADDRESS")
         or os.getenv("EDGESWARM_WALLET_ADDRESS")
-        or get_edgeswarm_worker_identity_v1()
+        or auth.get("walletAddress")
+        or auth.get("wallet_address")
+        or auth.get("worker")
+        or ""
     ).strip()
-    private_key = os.getenv("EDGE_PRIVATE_KEY", "").strip()
-
-    if not provider_email:
-        raise SystemExit("EdgeSwarm login is required. Run: sudo -E /opt/edgeswarm-node/.venv/bin/python /opt/edgeswarm-node/scripts/edgeswarm_linux_login.py")
 
     if private_key:
         if not Account:
-            raise SystemExit("EDGE_PRIVATE_KEY was provided, but eth_account is not installed.")
+            raise SystemExit("A private key was found, but eth_account is not installed.")
+        try:
+            account = Account.from_key(private_key)
+            wallet_address = account.address
+            private_key = account.key.hex()
+            log(f"[WALLET] Loaded Linux node wallet from private key: {wallet_address[:10]}...")
+        except Exception as exc:
+            raise SystemExit(f"Invalid Linux node private key: {exc}")
+    elif _edgeswarm_is_wallet_address_v1(wallet_address):
+        log(f"[WALLET] Loaded Linux node wallet address: {wallet_address[:10]}...")
+    else:
+        if not Account:
+            raise SystemExit("eth_account is required to create a Linux node wallet.")
+        account = Account.create()
+        wallet_address = account.address
+        private_key = account.key.hex()
+        log(f"[WALLET] Created new local Linux node wallet: {wallet_address[:10]}...")
+
+    if not _edgeswarm_is_wallet_address_v1(wallet_address):
+        raise SystemExit("Linux wallet address is missing or invalid.")
+
+    auth["providerEmail"] = provider_email
+    auth["walletAddress"] = wallet_address
+    auth["worker"] = wallet_address
+    auth["nodeWalletCreatedAt"] = auth.get("nodeWalletCreatedAt") or int(time.time())
+
+    if private_key:
+        auth["nodeWalletPrivateKey"] = private_key
+
+    _edgeswarm_save_auth_session_v1(auth)
+
+    return wallet_address, private_key
+
+
+def register_provider_node_profile_v1(provider_email: str, wallet_address: str, hardware_id: str, hardware_profile: Dict[str, Any]) -> None:
+    if not provider_email or not wallet_address or not hardware_id:
+        log("[WALLET] Provider node registration skipped: missing provider, wallet, or hardware id.")
+        return
+
+    payload = {
+        "providerEmail": provider_email,
+        "hardwareId": hardware_id,
+        "wallet_address": wallet_address,
+        "walletAddress": wallet_address,
+        "worker": wallet_address,
+        "nodeType": hardware_profile.get("nodeType") or NODE_TYPE,
+        "platform": hardware_profile.get("osType") or "linux",
+        "appVersion": f"v{APP_VERSION}",
+        "nodeLabel": hardware_profile.get("hostname") or "Linux Desktop Node",
+    }
+
+    try:
+        res = requests.post(
+            f"{GCP_BASE_URL}/v1/provider/register-node",
+            json=payload,
+            timeout=10,
+        )
 
         try:
-            wallet_address = Account.from_key(private_key).address
-            log(f"[WALLET] Derived wallet address from EDGE_PRIVATE_KEY: {wallet_address[:10]}...")
-        except Exception as exc:
-            raise SystemExit(f"Invalid EDGE_PRIVATE_KEY: {exc}")
+            data = res.json()
+        except Exception:
+            data = {"raw": res.text[:300]}
+
+        if res.status_code in (200, 201):
+            node = data.get("node") or {}
+            registered_wallet = node.get("walletAddress") or node.get("wallet_address") or wallet_address
+            log(f"[WALLET] Provider node profile {data.get('status')}: {registered_wallet[:10]}...")
+            return
+
+        log(f"[WALLET] Provider node registration failed HTTP {res.status_code}: {str(data)[:300]}")
+    except Exception as exc:
+        log(f"[WALLET] Provider node registration error: {exc}")
+
+
+def load_identity_from_env() -> Tuple[str, str, str]:
+    auth = ensure_edgeswarm_auth_session_v1()
+
+    if not is_edgeswarm_auth_session_valid_v1(auth):
+        raise SystemExit(
+            "EdgeSwarm login + 2FA is required. Run the Linux terminal login again."
+        )
+
+    provider_email = str(auth.get("providerEmail") or auth.get("email") or "").strip().lower()
+
+    if not provider_email:
+        raise SystemExit(
+            "Provider email missing from valid auth session. Run the Linux terminal login again."
+        )
+
+    wallet_address, private_key = _edgeswarm_load_or_create_linux_wallet_v1(provider_email)
+
+    log(f"[IDENTITY] provider={provider_email} wallet={wallet_address[:10]}...")
 
     return provider_email, wallet_address, private_key
 
@@ -1747,6 +2066,7 @@ def run_node(args: argparse.Namespace) -> None:
 
     hardware_profile = collect_hardware_profile()
     hardware_id = get_hardware_id(provider_email, wallet_address, hardware_profile)
+    register_provider_node_profile_v1(provider_email, wallet_address, hardware_id, hardware_profile)
     trust_profile = build_trust_profile(hardware_profile)
 
     log(f"[NODE] EdgeSwarm Mac/Linux deterministic node v{APP_VERSION}")

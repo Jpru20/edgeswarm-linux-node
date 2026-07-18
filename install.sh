@@ -1,33 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# EDGESWARM_LINUX_TKINTER_DEP_V1
-echo "[EdgeSwarm] Checking Linux UI tkinter dependency..."
-
-if ! python3 - <<'PYTK' >/dev/null 2>&1
-import tkinter
-PYTK
-then
-  if command -v apt-get >/dev/null 2>&1; then
-    echo "[EdgeSwarm] Installing python3-tk for Linux UI..."
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y python3-tk
-  else
-    echo "[EdgeSwarm] WARNING: tkinter missing and apt-get not found. Install python3-tk manually for the UI."
-  fi
-fi
-
-
 AUTO_UPDATE="0"
 if [[ "${1:-}" == "--auto-update" ]]; then
   AUTO_UPDATE="1"
 fi
 
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="${EDGESWARM_INSTALL_DIR:-/opt/edgeswarm-node}"
 ENV_FILE="${EDGESWARM_ENV_FILE:-/etc/edgeswarm-node.env}"
 SERVICE_NAME="edgeswarm-node"
 UPDATER_NAME="edgeswarm-node-updater"
 SERVICE_USER="${EDGESWARM_SERVICE_USER:-edgeswarm}"
+
+SUPABASE_URL_DEFAULT=https://xrmwmoqgukjztboemvgi.supabase.co
+SUPABASE_ANON_KEY_DEFAULT=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhybXdtb3FndWtqenRib2VtdmdpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk3MzgzNDcsImV4cCI6MjA5NTMxNDM0N30.3kP1uRFgRAgr2L2eh3Su36icRUHMEsfYIJc1RBV1jjM
 
 echo "[EdgeSwarm] Installing Linux node to $INSTALL_DIR"
 
@@ -37,8 +24,62 @@ if [[ "$EUID" -ne 0 ]]; then
   exit 1
 fi
 
-apt-get update
-apt-get install -y python3 python3-venv python3-pip ca-certificates curl tar
+if [[ "${EDGESWARM_SKIP_SYSTEM_PACKAGES:-0}" == "1" ]]; then
+  echo "[EdgeSwarm] System dependencies are managed by the package installer."
+elif command -v apt-get >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y     python3     python3-venv     python3-pip     ca-certificates     curl     tar     python3-tk
+else
+  echo "[EdgeSwarm] WARNING: apt-get not found."
+  echo "[EdgeSwarm] Ensure Python 3, venv, pip, curl, tar, and tkinter are installed."
+fi
+
+EXISTING_AUTH_PRESENT="0"
+
+if [[ -s /etc/edgeswarm-node-auth.json ]]; then
+  if python3 - /etc/edgeswarm-node-auth.json <<'PY_EXISTING_AUTH'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+
+try:
+    auth = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(1)
+
+access_token = (
+    auth.get("accessToken")
+    or auth.get("access_token")
+)
+refresh_token = (
+    auth.get("refreshToken")
+    or auth.get("refresh_token")
+)
+provider = (
+    auth.get("providerEmail")
+    or auth.get("provider_email")
+    or auth.get("email")
+)
+
+raise SystemExit(
+    0
+    if access_token and refresh_token and provider
+    else 1
+)
+PY_EXISTING_AUTH
+  then
+    EXISTING_AUTH_PRESENT="1"
+  fi
+fi
+
+START_NODE_AFTER_INSTALL="$AUTO_UPDATE"
+
+if [[ "$EXISTING_AUTH_PRESENT" == "1" ]]; then
+  START_NODE_AFTER_INSTALL="1"
+  echo "[EdgeSwarm] Existing authenticated node detected; service will resume after installation."
+fi
 
 if ! id "$SERVICE_USER" >/dev/null 2>&1; then
   useradd --system --create-home --shell /usr/sbin/nologin "$SERVICE_USER"
@@ -48,10 +89,14 @@ mkdir -p "$INSTALL_DIR"
 mkdir -p /var/lib/edgeswarm-node/models
 mkdir -p /var/log/edgeswarm-node
 
+echo "[EdgeSwarm] Copying release files..."
 tar \
   --exclude=".git" \
   --exclude=".venv" \
   --exclude="__pycache__" \
+  --exclude="*.pyc" \
+  --exclude="*.gguf" \
+  -C "$SRC_DIR" \
   -cf - . | tar -xf - -C "$INSTALL_DIR"
 
 python3 -m venv "$INSTALL_DIR/.venv"
@@ -61,96 +106,160 @@ if [[ -f "$INSTALL_DIR/requirements.txt" ]]; then
   "$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
 fi
 
-if [[ -f "$INSTALL_DIR/scripts/edgeswarm_linux_release_metadata.py" ]]; then
-  echo "[EdgeSwarm] Writing Linux release metadata."
-  "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/scripts/edgeswarm_linux_release_metadata.py" \
-    --install-dir "$INSTALL_DIR" \
-    --api-base "${EDGESWARM_API_BASE_URL:-https://api.edgeswarm.io}" || true
-fi
+PACKAGED_PUBLIC_RELEASE_SAFE="false"
 
-if [[ ! -f "$ENV_FILE" ]]; then
-  if [[ -f "$INSTALL_DIR/edgeswarm-node.env.example" ]]; then
-    cp "$INSTALL_DIR/edgeswarm-node.env.example" "$ENV_FILE"
+if [[ -f "$INSTALL_DIR/scripts/edgeswarm_linux_release_metadata.py" ]]; then
+  PACKAGED_PUBLIC_RELEASE_SAFE="$(
+    "$INSTALL_DIR/.venv/bin/python" - "$INSTALL_DIR/RELEASE_METADATA.json" <<'PY_METADATA'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+
+try:
+    data = json.loads(path.read_text())
+    print("true" if data.get("publicReleaseSafe") is True else "false")
+except Exception:
+    print("false")
+PY_METADATA
+  )"
+
+  if [[ "$PACKAGED_PUBLIC_RELEASE_SAFE" == "true" ]]; then
+    echo "[EdgeSwarm] Validating public release metadata."
+
+    "$INSTALL_DIR/.venv/bin/python"       "$INSTALL_DIR/scripts/edgeswarm_linux_release_metadata.py"       --install-dir "$INSTALL_DIR"       --api-base "${EDGESWARM_API_BASE_URL:-https://api.edgeswarm.io}"
   else
-    cat > "$ENV_FILE" <<'EOF'
-EDGESWARM_API_BASE_URL=https://api.edgeswarm.io
-EDGESWARM_PROVIDER_EMAIL=
-EDGESWARM_WALLET_ADDRESS=
-EDGESWARM_INSTALL_DIR=/opt/edgeswarm-node
-EDGESWARM_MODEL_DIR=/var/lib/edgeswarm-node/models
-EDGESWARM_ENABLE_AUTO_UPDATE=1
-EOF
+    echo "[EdgeSwarm] Preserving packaged private-candidate release metadata."
   fi
 fi
 
-cp "$INSTALL_DIR/systemd/edgeswarm-node.service.example" "/etc/systemd/system/${SERVICE_NAME}.service"
-cp "$INSTALL_DIR/systemd/edgeswarm-node-updater.service.example" "/etc/systemd/system/${UPDATER_NAME}.service"
-cp "$INSTALL_DIR/systemd/edgeswarm-node-updater.timer.example" "/etc/systemd/system/${UPDATER_NAME}.timer"
+touch "$ENV_FILE"
 
-chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR" /var/lib/edgeswarm-node /var/log/edgeswarm-node
-chmod +x "$INSTALL_DIR/scripts/edgeswarm_linux_auto_update.py" || true
+upsert_env() {
+  local key="$1"
+  local value="$2"
+
+  if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
+  else
+    printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+  fi
+}
+
+upsert_env "EDGESWARM_API_BASE_URL" "https://api.edgeswarm.io"
+upsert_env "EDGESWARM_API_BASE" "https://api.edgeswarm.io"
+upsert_env "GCP_BASE_URL" "https://api.edgeswarm.io"
+upsert_env "SUPABASE_URL" "$SUPABASE_URL_DEFAULT"
+upsert_env "SUPABASE_ANON_KEY" "$SUPABASE_ANON_KEY_DEFAULT"
+upsert_env "EDGESWARM_INSTALL_DIR" "$INSTALL_DIR"
+upsert_env "EDGESWARM_MODEL_DIR" "/var/lib/edgeswarm-node/models"
+upsert_env "EDGESWARM_AUTH_FILE" "/etc/edgeswarm-node-auth.json"
+upsert_env "EDGESWARM_ENABLE_AUTO_UPDATE" "$PACKAGED_PUBLIC_RELEASE_SAFE"
+
+touch /etc/edgeswarm-node-auth.json
+chown root:"$SERVICE_USER" /etc/edgeswarm-node-auth.json
+chmod 660 /etc/edgeswarm-node-auth.json
+
+chown root:"$SERVICE_USER" "$ENV_FILE"
+chmod 640 "$ENV_FILE"
+
+if [[ -f "$INSTALL_DIR/systemd/edgeswarm-node.service.example" ]]; then
+  cp "$INSTALL_DIR/systemd/edgeswarm-node.service.example" "/etc/systemd/system/${SERVICE_NAME}.service"
+else
+  cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
+[Unit]
+Description=EdgeSwarm Linux Node
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=${SERVICE_USER}
+Group=${SERVICE_USER}
+WorkingDirectory=${INSTALL_DIR}
+EnvironmentFile=-${ENV_FILE}
+ExecStart=${INSTALL_DIR}/.venv/bin/python ${INSTALL_DIR}/edgeswarm_node.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+fi
+
+if [[ -f "$INSTALL_DIR/systemd/edgeswarm-node-updater.service.example" ]]; then
+  cp "$INSTALL_DIR/systemd/edgeswarm-node-updater.service.example" "/etc/systemd/system/${UPDATER_NAME}.service"
+fi
+
+if [[ -f "$INSTALL_DIR/systemd/edgeswarm-node-updater.timer.example" ]]; then
+  cp "$INSTALL_DIR/systemd/edgeswarm-node-updater.timer.example" "/etc/systemd/system/${UPDATER_NAME}.timer"
+fi
+
+chown -R root:root "$INSTALL_DIR"
+chmod -R go-w "$INSTALL_DIR"
+
+chown -R   "$SERVICE_USER:$SERVICE_USER"   /var/lib/edgeswarm-node   /var/log/edgeswarm-node
+
+chmod +x "$INSTALL_DIR/edgeswarm_node.py" 2>/dev/null || true
+chmod +x "$INSTALL_DIR/edgeswarm_linux_ui.py" 2>/dev/null || true
+chmod +x "$INSTALL_DIR/scripts/"*.py 2>/dev/null || true
+chmod +x "$INSTALL_DIR/scripts/"*.sh 2>/dev/null || true
+
+echo "[EdgeSwarm] Installing CLI and desktop launcher."
+
+install -d /usr/local/bin
+ln -sfn   "$INSTALL_DIR/scripts/edgeswarm_cli.sh"   /usr/local/bin/edgeswarm
+
+if [[ -f "$INSTALL_DIR/desktop/edgeswarm-node.desktop" ]]; then
+  install -Dm644     "$INSTALL_DIR/desktop/edgeswarm-node.desktop"     /usr/share/applications/edgeswarm-node.desktop
+
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database /usr/share/applications || true
+  fi
+fi
 
 systemctl daemon-reload
-systemctl enable "${SERVICE_NAME}.service"
-systemctl enable "${UPDATER_NAME}.timer"
 
-if [[ "$AUTO_UPDATE" == "1" ]]; then
-  echo "[EdgeSwarm] Auto-update mode. Restarting node service."
+if [[ "$START_NODE_AFTER_INSTALL" == "1" ]]; then
+  systemctl enable "${SERVICE_NAME}.service"
+else
+  echo "[EdgeSwarm] Node service remains disabled until authentication succeeds."
+  systemctl disable --now "${SERVICE_NAME}.service" 2>/dev/null || true
+fi
+
+if [[ -f "/etc/systemd/system/${UPDATER_NAME}.timer" ]]; then
+  if [[ "$PACKAGED_PUBLIC_RELEASE_SAFE" == "true" ]]; then
+    systemctl enable "${UPDATER_NAME}.timer"
+  else
+    echo "[EdgeSwarm] Private candidate: updater timer remains disabled."
+    systemctl disable --now "${UPDATER_NAME}.timer" 2>/dev/null || true
+  fi
+fi
+
+if [[ "$START_NODE_AFTER_INSTALL" == "1" ]]; then
+  echo "[EdgeSwarm] Enabling and restarting authenticated node service."
   systemctl restart "${SERVICE_NAME}.service" || true
 else
-  echo "[EdgeSwarm] Starting node service and updater timer."
-  systemctl restart "${SERVICE_NAME}.service" || true
-  systemctl restart "${UPDATER_NAME}.timer" || true
+  echo "[EdgeSwarm] Node service installed but not started yet."
+  echo "[EdgeSwarm] Authenticate with email/password/2FA first, then start the node."
+  systemctl stop "${SERVICE_NAME}.service" || true
+
+  if [[     -f "/etc/systemd/system/${UPDATER_NAME}.timer"     && "$PACKAGED_PUBLIC_RELEASE_SAFE" == "true"   ]]; then
+    systemctl restart "${UPDATER_NAME}.timer"
+  fi
 fi
 
 echo "[EdgeSwarm] Install complete."
 echo ""
-echo "Next step: authenticate this Linux node:"
-echo "  sudo -E /opt/edgeswarm-node/.venv/bin/python /opt/edgeswarm-node/scripts/edgeswarm_linux_login.py"
+echo "Authenticate and start the Linux node:"
+echo "  edgeswarm login"
 echo ""
-echo "Then start the node:"
-echo "  sudo systemctl restart edgeswarm-node"
-
-echo "Node service:"
-echo "  sudo systemctl status ${SERVICE_NAME} --no-pager -l"
-echo "Updater timer:"
-echo "  sudo systemctl status ${UPDATER_NAME}.timer --no-pager -l"
-
-
-# EDGESWARM_LINUX_UI_INSTALL_V1
-echo "[EdgeSwarm] Installing Linux UI files..."
-
-if [ -f "$SRC_DIR/edgeswarm_linux_ui.py" ]; then
-  cp "$SRC_DIR/edgeswarm_linux_ui.py" "$INSTALL_DIR/edgeswarm_linux_ui.py"
-fi
-
-if [ -f "$SRC_DIR/edgeswarm_ui_common.py" ]; then
-  cp "$SRC_DIR/edgeswarm_ui_common.py" "$INSTALL_DIR/edgeswarm_ui_common.py"
-fi
-
-if [ -f "$SRC_DIR/edgeswarm_ui_auth.py" ]; then
-  cp "$SRC_DIR/edgeswarm_ui_auth.py" "$INSTALL_DIR/edgeswarm_ui_auth.py"
-fi
-
-if [ -f "$SRC_DIR/edgeswarm_ui_login.py" ]; then
-  cp "$SRC_DIR/edgeswarm_ui_login.py" "$INSTALL_DIR/edgeswarm_ui_login.py"
-fi
-
-if [ -f "$SRC_DIR/edgeswarm_ui_dashboard.py" ]; then
-  cp "$SRC_DIR/edgeswarm_ui_dashboard.py" "$INSTALL_DIR/edgeswarm_ui_dashboard.py"
-fi
-
-if [ -f "$SRC_DIR/scripts/edgeswarm_linux_install_auth.py" ]; then
-  mkdir -p "$INSTALL_DIR/scripts"
-  cp "$SRC_DIR/scripts/edgeswarm_linux_install_auth.py" "$INSTALL_DIR/scripts/edgeswarm_linux_install_auth.py"
-  chmod +x "$INSTALL_DIR/scripts/edgeswarm_linux_install_auth.py"
-fi
-
-if [ -f "$SRC_DIR/desktop/edgeswarm-node.desktop" ]; then
-  mkdir -p /usr/share/applications
-  cp "$SRC_DIR/desktop/edgeswarm-node.desktop" /usr/share/applications/edgeswarm-node.desktop
-  chmod 644 /usr/share/applications/edgeswarm-node.desktop
-fi
-
-chmod +x "$INSTALL_DIR/edgeswarm_linux_ui.py" 2>/dev/null || true
-
+echo "Node controls:"
+echo "  edgeswarm start"
+echo "  edgeswarm stop"
+echo "  edgeswarm status"
+echo "  edgeswarm logs --follow"
+echo ""
+echo "Desktop users can launch:"
+echo "  EdgeSwarm Node"

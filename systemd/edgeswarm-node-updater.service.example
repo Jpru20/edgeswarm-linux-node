@@ -1,0 +1,9 @@
+[Unit]
+Description=EdgeSwarm Linux Node Auto Updater
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/edgeswarm-node.env
+ExecStart=/opt/edgeswarm-node/.venv/bin/python /opt/edgeswarm-node/scripts/edgeswarm_linux_auto_update.py --install-dir /opt/edgeswarm-node
