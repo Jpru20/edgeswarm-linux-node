@@ -3,7 +3,7 @@ set -u
 
 INSTALL_DIR="/opt/edgeswarm-node"
 SERVICE="edgeswarm-node.service"
-PYTHON="$INSTALL_DIR/.venv/bin/python"
+PYTHON="$INSTALL_DIR/runtime/bin/edgeswarm-python"
 LOGIN_SCRIPT="$INSTALL_DIR/scripts/edgeswarm_linux_login.py"
 ENV_FILE="/etc/edgeswarm-node.env"
 STATUS_FILE="/var/lib/edgeswarm-node/ui_status.json"

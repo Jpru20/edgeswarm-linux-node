@@ -12,6 +12,7 @@ ENV_FILE="${EDGESWARM_ENV_FILE:-/etc/edgeswarm-node.env}"
 SERVICE_NAME="edgeswarm-node"
 UPDATER_NAME="edgeswarm-node-updater"
 SERVICE_USER="${EDGESWARM_SERVICE_USER:-edgeswarm}"
+SOURCE_PYTHON="$SRC_DIR/runtime/bin/edgeswarm-python"
 
 SUPABASE_URL_DEFAULT=https://xrmwmoqgukjztboemvgi.supabase.co
 SUPABASE_ANON_KEY_DEFAULT=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhybXdtb3FndWtqenRib2VtdmdpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk3MzgzNDcsImV4cCI6MjA5NTMxNDM0N30.3kP1uRFgRAgr2L2eh3Su36icRUHMEsfYIJc1RBV1jjM
@@ -24,20 +25,30 @@ if [[ "$EUID" -ne 0 ]]; then
   exit 1
 fi
 
-if [[ "${EDGESWARM_SKIP_SYSTEM_PACKAGES:-0}" == "1" ]]; then
-  echo "[EdgeSwarm] System dependencies are managed by the package installer."
-elif command -v apt-get >/dev/null 2>&1; then
-  apt-get update
-  apt-get install -y     python3     python3-venv     python3-pip     ca-certificates     curl     tar     python3-tk
-else
-  echo "[EdgeSwarm] WARNING: apt-get not found."
-  echo "[EdgeSwarm] Ensure Python 3, venv, pip, curl, tar, and tkinter are installed."
+if [[ ! -x "$SOURCE_PYTHON" ]]; then
+  echo "[EdgeSwarm] Bundled runtime is missing:" >&2
+  echo "  $SOURCE_PYTHON" >&2
+  exit 1
 fi
+
+echo "[EdgeSwarm] Using bundled Python runtime."
+
+"$SOURCE_PYTHON" - <<'PY_RUNTIME'
+import sys
+
+assert sys.version_info[:3] == (3, 10, 20)
+
+print(
+    "[EdgeSwarm] Bundled Python:",
+    sys.version.split()[0],
+)
+PY_RUNTIME
+
 
 EXISTING_AUTH_PRESENT="0"
 
 if [[ -s /etc/edgeswarm-node-auth.json ]]; then
-  if python3 - /etc/edgeswarm-node-auth.json <<'PY_EXISTING_AUTH'
+  if "$SOURCE_PYTHON" - /etc/edgeswarm-node-auth.json <<'PY_EXISTING_AUTH'
 import json
 import sys
 from pathlib import Path
@@ -89,6 +100,10 @@ mkdir -p "$INSTALL_DIR"
 mkdir -p /var/lib/edgeswarm-node/models
 mkdir -p /var/log/edgeswarm-node
 
+if [[ "$SRC_DIR" != "$INSTALL_DIR" ]]; then
+  rm -rf "$INSTALL_DIR/runtime"
+fi
+
 echo "[EdgeSwarm] Copying release files..."
 tar \
   --exclude=".git" \
@@ -99,18 +114,37 @@ tar \
   -C "$SRC_DIR" \
   -cf - . | tar -xf - -C "$INSTALL_DIR"
 
-python3 -m venv "$INSTALL_DIR/.venv"
-"$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip wheel setuptools
+RUNTIME_PYTHON="$INSTALL_DIR/runtime/bin/edgeswarm-python"
 
-if [[ -f "$INSTALL_DIR/requirements.txt" ]]; then
-  "$INSTALL_DIR/.venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
+if [[ ! -x "$RUNTIME_PYTHON" ]]; then
+  echo "[EdgeSwarm] Installed bundled runtime is missing." >&2
+  exit 1
 fi
+
+"$RUNTIME_PYTHON" - <<'PY_IMPORTS'
+import customtkinter
+import psutil
+import requests
+import supabase
+from eth_account import Account
+from llama_cpp import llama_cpp
+
+assert hasattr(llama_cpp, "llama_backend_init")
+assert Account.create().address
+
+print(
+    "[EdgeSwarm] Bundled dependency validation passed."
+)
+PY_IMPORTS
+
+rm -rf "$INSTALL_DIR/.venv"
+
 
 PACKAGED_PUBLIC_RELEASE_SAFE="false"
 
 if [[ -f "$INSTALL_DIR/scripts/edgeswarm_linux_release_metadata.py" ]]; then
   PACKAGED_PUBLIC_RELEASE_SAFE="$(
-    "$INSTALL_DIR/.venv/bin/python" - "$INSTALL_DIR/RELEASE_METADATA.json" <<'PY_METADATA'
+    "$INSTALL_DIR/runtime/bin/edgeswarm-python" - "$INSTALL_DIR/RELEASE_METADATA.json" <<'PY_METADATA'
 import json
 import sys
 from pathlib import Path
@@ -128,7 +162,7 @@ PY_METADATA
   if [[ "$PACKAGED_PUBLIC_RELEASE_SAFE" == "true" ]]; then
     echo "[EdgeSwarm] Validating public release metadata."
 
-    "$INSTALL_DIR/.venv/bin/python"       "$INSTALL_DIR/scripts/edgeswarm_linux_release_metadata.py"       --install-dir "$INSTALL_DIR"       --api-base "${EDGESWARM_API_BASE_URL:-https://api.edgeswarm.io}"
+    "$INSTALL_DIR/runtime/bin/edgeswarm-python"       "$INSTALL_DIR/scripts/edgeswarm_linux_release_metadata.py"       --install-dir "$INSTALL_DIR"       --api-base "${EDGESWARM_API_BASE_URL:-https://api.edgeswarm.io}"
   else
     echo "[EdgeSwarm] Preserving packaged private-candidate release metadata."
   fi
@@ -179,7 +213,7 @@ User=${SERVICE_USER}
 Group=${SERVICE_USER}
 WorkingDirectory=${INSTALL_DIR}
 EnvironmentFile=-${ENV_FILE}
-ExecStart=${INSTALL_DIR}/.venv/bin/python ${INSTALL_DIR}/edgeswarm_node.py
+ExecStart=${INSTALL_DIR}/runtime/bin/edgeswarm-python ${INSTALL_DIR}/edgeswarm_node.py
 Restart=always
 RestartSec=10
 
@@ -205,6 +239,7 @@ chmod +x "$INSTALL_DIR/edgeswarm_node.py" 2>/dev/null || true
 chmod +x "$INSTALL_DIR/edgeswarm_linux_ui.py" 2>/dev/null || true
 chmod +x "$INSTALL_DIR/scripts/"*.py 2>/dev/null || true
 chmod +x "$INSTALL_DIR/scripts/"*.sh 2>/dev/null || true
+chmod 755 "$INSTALL_DIR/runtime/bin/edgeswarm-python"
 
 echo "[EdgeSwarm] Installing CLI and desktop launcher."
 

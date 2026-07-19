@@ -9,7 +9,7 @@ User=edgeswarm
 Group=edgeswarm
 WorkingDirectory=/opt/edgeswarm-node
 EnvironmentFile=-/etc/edgeswarm-node.env
-ExecStart=/opt/edgeswarm-node/.venv/bin/python /opt/edgeswarm-node/edgeswarm_node.py
+ExecStart=/opt/edgeswarm-node/runtime/bin/edgeswarm-python /opt/edgeswarm-node/edgeswarm_node.py
 Restart=always
 RestartSec=10
 

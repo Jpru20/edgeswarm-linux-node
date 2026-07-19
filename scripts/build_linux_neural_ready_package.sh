@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="/opt/edgeswarm-node"
 PYTHON="$ROOT/.venv/bin/python"
+STANDALONE_RUNTIME="${EDGESWARM_STANDALONE_RUNTIME:-}"
 VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 RELEASE_MODE="${1:-}"
 
@@ -27,6 +28,11 @@ case "$(uname -m)" in
     exit 1
     ;;
 esac
+
+if [[ ! -x "$STANDALONE_RUNTIME/bin/edgeswarm-python" ]]; then
+  echo "Missing standalone runtime: $STANDALONE_RUNTIME" >&2
+  exit 1
+fi
 
 case "$RELEASE_MODE" in
   --public-beta|public_beta)
@@ -85,6 +91,13 @@ copy_release_source() {
     -C "$ROOT" \
     -cf - . \
   | tar -xf - -C "$destination"
+
+  if [[ "$package_type" == "deb" ]]; then
+    echo "[EdgeSwarm] Embedding standalone runtime."
+    mkdir -p "$destination/runtime"
+    tar -C "$STANDALONE_RUNTIME" -cf - . | tar -xf - -C "$destination/runtime"
+    test -x "$destination/runtime/bin/edgeswarm-python"
+  fi
 
   "$PYTHON" -     "$destination"     "$VERSION"     "$package_type"     "$RELEASE_CHANNEL"     "$PUBLIC_RELEASE_SAFE"     "$HASH_STATUS"     "$SIGNATURE_TYPE"     "$SIGNER_STATUS"     "$RELEASE_KIND" <<'PY'
 import json
@@ -185,12 +198,14 @@ manifest = {
 PY
 
   find "$destination" \
+    -path "$destination/runtime" -prune -o \
     -type f \
     -name '*.py' \
     -print0 \
   | xargs -0 "$PYTHON" -m py_compile
 
   find "$destination" \
+    -path "$destination/runtime" -prune -o \
     -type f \
     -name '*.sh' \
     -print0 \
@@ -235,9 +250,9 @@ Section: utils
 Priority: optional
 Architecture: ${DEB_ARCH}
 Maintainer: EdgeSwarm <support@edgeswarm.io>
-Depends: python3 (>= 3.10), python3-venv, python3-pip, python3-tk, ca-certificates, curl, tar, policykit-1, build-essential, cmake
+Depends: libc6 (>= 2.35), systemd
 Description: EdgeSwarm Linux compute node
- Desktop and headless EdgeSwarm node with deterministic and
+ Self-contained desktop and headless EdgeSwarm node with deterministic and
  local neural inference support.
 EOF
 
@@ -289,6 +304,8 @@ chmod 755 \
 dpkg-deb \
   --build \
   --root-owner-group \
+    -Zgzip \
+    -z1 \
   "$DEB_ROOT" \
   "$DEB_PATH"
 
