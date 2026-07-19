@@ -61,8 +61,7 @@ except Exception:
     encode_defunct = None
 
 
-APP_VERSION = "0.1.5"
-
+APP_VERSION = "0.1.6"
 # EDGE_SWARM_LINUX_AUTH_HEADERS_COMPAT_V1
 
 def build_auth_headers() -> dict:

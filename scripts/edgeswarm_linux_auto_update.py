@@ -193,12 +193,43 @@ def main():
     download_url = str(manifest.get("downloadUrl") or "").strip()
     expected_sha = str(manifest.get("sha256") or "").strip().lower()
 
+    package_type = str(
+        manifest.get("packageType") or ""
+    ).strip().lower()
+
+    if package_type in (
+        "debian",
+        "application/x-debian-package",
+    ):
+        package_type = "deb"
+    elif package_type in (
+        "tgz",
+        "source",
+    ):
+        package_type = "tar.gz"
+
+    if not package_type:
+        download_path = urllib.parse.urlparse(
+            download_url
+        ).path.lower()
+
+        if download_path.endswith(".deb"):
+            package_type = "deb"
+        elif (
+            download_path.endswith(".tar.gz")
+            or download_path.endswith(".tgz")
+        ):
+            package_type = "tar.gz"
+        else:
+            package_type = "unknown"
+
     print(json.dumps({
         "currentVersion": current_version,
         "latestVersion": latest_version,
         "updateAvailable": update_available,
         "downloadUrlPresent": bool(download_url),
         "sha256Present": bool(expected_sha),
+        "packageType": package_type,
         "publicReleaseSafe": manifest.get("publicReleaseSafe"),
         "releaseChannel": manifest.get("releaseChannel"),
     }, indent=2))
@@ -223,37 +254,71 @@ def main():
     if manifest.get("publicReleaseSafe") is not True:
         raise RuntimeError("Refusing update because manifest publicReleaseSafe is not true.")
 
+    if package_type not in ("deb", "tar.gz"):
+        raise RuntimeError(
+            f"Unsupported update package type: {package_type}"
+        )
+
     if args.check_only:
         print("[edgeswarm-updater] check-only mode; update available but not installing")
         return 0
 
     with tempfile.TemporaryDirectory(prefix="edgeswarm-update-") as tmp:
         tmp_dir = Path(tmp)
-        tar_path = tmp_dir / "edgeswarm-node-update.tar.gz"
-        extract_dir = tmp_dir / "extract"
+
+        if package_type == "deb":
+            package_path = tmp_dir / "edgeswarm-node-update.deb"
+        else:
+            package_path = tmp_dir / "edgeswarm-node-update.tar.gz"
 
         print(f"[edgeswarm-updater] downloading: {download_url}")
-        download_file(download_url, tar_path)
+        download_file(download_url, package_path)
 
-        actual_sha = sha256_file(tar_path)
+        actual_sha = sha256_file(package_path)
         print(f"[edgeswarm-updater] expected sha256: {expected_sha}")
         print(f"[edgeswarm-updater] actual sha256:   {actual_sha}")
 
         if actual_sha != expected_sha:
             raise RuntimeError("SHA256 mismatch. Update blocked.")
 
-        extract_dir.mkdir(parents=True, exist_ok=True)
-        safe_extract_tar_gz(tar_path, extract_dir)
+        install_env = {
+            "EDGESWARM_INSTALL_PACKAGE_SHA256": expected_sha,
+            "EDGESWARM_INSTALL_DOWNLOAD_URL": download_url,
+            "EDGESWARM_API_BASE_URL": args.api_base.rstrip("/"),
+        }
 
-        package_root = find_package_root(extract_dir)
-        run(
-            ["bash", str(package_root / "install.sh"), "--auto-update"],
-            cwd=str(package_root),
-            extra_env={
-                "EDGESWARM_INSTALL_PACKAGE_SHA256": expected_sha,
-                "EDGESWARM_INSTALL_DOWNLOAD_URL": download_url,
-            },
-        )
+        if package_type == "deb":
+            install_env["DEBIAN_FRONTEND"] = "noninteractive"
+
+            run(
+                [
+                    "apt-get",
+                    "install",
+                    "-y",
+                    str(package_path),
+                ],
+                extra_env=install_env,
+            )
+        else:
+            extract_dir = tmp_dir / "extract"
+            extract_dir.mkdir(parents=True, exist_ok=True)
+
+            safe_extract_tar_gz(
+                package_path,
+                extract_dir,
+            )
+
+            package_root = find_package_root(extract_dir)
+
+            run(
+                [
+                    "bash",
+                    str(package_root / "install.sh"),
+                    "--auto-update",
+                ],
+                cwd=str(package_root),
+                extra_env=install_env,
+            )
 
     print("[edgeswarm-updater] update installed successfully")
     return 0

@@ -2,11 +2,11 @@
   "manifestVersion": "edgeswarm_linux_package_manifest_v1",
   "platform": "linux",
   "architecture": "x64",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "releaseChannel": "public_beta",
-  "packageType": "tar.gz",
+  "packageType": "deb",
   "publicReleaseSafe": true,
-  "runtimeSha256": "0a9b6515c5c11db2e705eb12d0ba5485b50760f635632b2dce975b4c262dfea5",
+  "runtimeSha256": "e19010e2560ad8ec8eaea30ebbe25b499a730f123e796571cc485dca785dc70f",
   "neuralModuleSha256": "6c1103a2ab9bf7707511ccc4fcd83dacfbc5faf57c4a77b9b7b86b936d17d9b6",
   "files": {
     ".gitignore": {
@@ -18,11 +18,11 @@
       "sizeBytes": 566
     },
     "RELEASE_METADATA.json": {
-      "sha256": "3af5b7ddad5207c1ec0ca150b249cff00025e9357bed3882ba790f07bc17b330",
-      "sizeBytes": 538
+      "sha256": "50084c0c22a82c5616902fa6634bed262d579faf3e24c00afea62d16dc19243b",
+      "sizeBytes": 532
     },
     "VERSION": {
-      "sha256": "800cf1c0392b24de7c0a1c6ea6778ecb433dec71c49a150bce96a98477527b2f",
+      "sha256": "1f2110568627307becae713f8b808f3d9d912d4b2a24ed6a78605f03f7437d3c",
       "sizeBytes": 6
     },
     "desktop/edgeswarm-node.desktop": {
@@ -46,8 +46,8 @@
       "sizeBytes": 14626
     },
     "edgeswarm_node.py": {
-      "sha256": "0a9b6515c5c11db2e705eb12d0ba5485b50760f635632b2dce975b4c262dfea5",
-      "sizeBytes": 72417
+      "sha256": "e19010e2560ad8ec8eaea30ebbe25b499a730f123e796571cc485dca785dc70f",
+      "sizeBytes": 72416
     },
     "edgeswarm_ui_auth.py": {
       "sha256": "5b3d1b30469b565b94746ab1b725d2bc24a0924bd5b31c504943f80faabb9e63",
@@ -86,8 +86,8 @@
       "sizeBytes": 3418
     },
     "scripts/edgeswarm_linux_auto_update.py": {
-      "sha256": "41a54db45bc7b7f1578738b745e29eaeddbc582dc3c2f0de36f840b62d540c23",
-      "sizeBytes": 7961
+      "sha256": "fb30ff1b04c5ccecb6b55de21926ca7733cca002415455f07cac9183b8884b4f",
+      "sizeBytes": 9588
     },
     "scripts/edgeswarm_linux_install_auth.py": {
       "sha256": "54eb14bf9d38d8cbf614c9069fb73ed2149d0a7cf421d9027fec2fb2b49a2ff4",

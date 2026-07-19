@@ -1,9 +1,9 @@
 {
   "releaseMetadataVersion": "linux_release_metadata_v1",
   "platform": "linux",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "releaseChannel": "public_beta",
-  "packageType": "tar.gz",
+  "packageType": "deb",
   "packageSha256": "",
   "downloadUrl": "",
   "manifestSha256": "",
@@ -13,6 +13,6 @@
   "signatureType": "unsigned_public_beta",
   "signerStatus": "unsigned_public_beta",
   "writtenAt": 1784278391,
-  "appVersion": "0.1.5",
-  "notes": "Linux v0.1.5 public beta tar.gz package."
+  "appVersion": "0.1.6",
+  "notes": "Linux v0.1.6 public beta deb package."
 }
