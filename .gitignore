@@ -13,3 +13,8 @@ release/
 
 # Local safety backups
 *.backup_*
+
+# Package-specific generated metadata
+/PACKAGE_MANIFEST.json
+/RELEASE_METADATA.json
+/RELEASE_SHA256

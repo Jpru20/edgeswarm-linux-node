@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import sys
 import json
 import os
 import platform
@@ -106,10 +107,17 @@ def main():
         or ""
     ).strip()
 
-    if manifest_version != current_version:
-        raise RuntimeError(
-            f"Manifest version {manifest_version} does not match "
-            f"installed version {current_version}"
+    version_matches = (
+        manifest_version == current_version
+    )
+
+    if not version_matches:
+        print(
+            "[EdgeSwarm] Remote manifest version "
+            f"{manifest_version or 'missing'} does not match "
+            f"installed version {current_version}; "
+            "automatic updates will remain disabled.",
+            file=sys.stderr,
         )
 
     if manifest.get("publicReleaseSafe") is not True:
@@ -150,6 +158,7 @@ def main():
 
     hash_recognized = bool(
         manifest.get("hashRecognized")
+        and version_matches
         and package_type_matches
         and package_sha
         and package_sha == manifest_sha
@@ -160,13 +169,17 @@ def main():
             manifest.get("hashStatus")
             or "recognized_public_beta_package"
         )
-    elif not package_sha:
+    elif not version_matches:
         hash_status = (
-            "installed_package_hash_unavailable"
+            "manifest_version_mismatch"
         )
     elif not package_type_matches:
         hash_status = (
             "manifest_package_type_mismatch"
+        )
+    elif not package_sha:
+        hash_status = (
+            "installed_package_hash_unavailable"
         )
     else:
         hash_status = (
@@ -187,6 +200,7 @@ def main():
         "packageType": packaged_package_type,
         "packageSha256": package_sha,
         "downloadUrl": download_url,
+        "manifestVersion": manifest_version,
         "manifestPackageType": manifest_package_type,
         "manifestSha256": manifest_sha,
         "hashRecognized": hash_recognized,
@@ -194,6 +208,7 @@ def main():
         "publicReleaseSafe": bool(
             packaged_public_release_safe
             and manifest.get("publicReleaseSafe") is True
+            and version_matches
             and package_type_matches
         ),
         "signatureType": (
