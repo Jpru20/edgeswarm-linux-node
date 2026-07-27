@@ -51,50 +51,181 @@ def main():
     install_dir = Path(args.install_dir)
     current_version = read_version(install_dir)
 
+    def load_local_json(path):
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            return {}
+
+    packaged_metadata = load_local_json(
+        install_dir / "RELEASE_METADATA.json"
+    )
+    packaged_manifest = load_local_json(
+        install_dir / "PACKAGE_MANIFEST.json"
+    )
+
+    packaged_package_type = str(
+        packaged_manifest.get("packageType")
+        or packaged_metadata.get("packageType")
+        or "tar.gz"
+    ).strip()
+
+    packaged_public_release_safe = (
+        packaged_manifest.get("publicReleaseSafe") is True
+        and packaged_metadata.get("publicReleaseSafe") is True
+    )
+
     query = urllib.parse.urlencode({
         "platform": "linux",
         "version": current_version,
         "arch": current_arch(),
+        "packageType": packaged_package_type,
         "t": int(time.time()),
     })
 
-    manifest_url = f"{args.api_base.rstrip('/')}/v1/node/update-manifest?{query}"
+    manifest_url = (
+        f"{args.api_base.rstrip('/')}"
+        f"/v1/node/update-manifest?{query}"
+    )
     manifest = fetch_json(manifest_url)
 
-    manifest_version = str(manifest.get("version") or manifest.get("latestVersion") or "").strip().lstrip("v")
-    manifest_sha = str(manifest.get("sha256") or manifest.get("packageSha256") or "").strip().lower()
+    manifest_version = str(
+        manifest.get("version")
+        or manifest.get("latestVersion")
+        or ""
+    ).strip().lstrip("v")
+
+    manifest_sha = str(
+        manifest.get("sha256")
+        or manifest.get("packageSha256")
+        or ""
+    ).strip().lower()
+
+    manifest_package_type = str(
+        manifest.get("packageType")
+        or ""
+    ).strip()
 
     if manifest_version != current_version:
-        raise RuntimeError(f"Manifest version {manifest_version} does not match installed version {current_version}")
+        raise RuntimeError(
+            f"Manifest version {manifest_version} does not match "
+            f"installed version {current_version}"
+        )
 
     if manifest.get("publicReleaseSafe") is not True:
-        raise RuntimeError("Manifest is not publicReleaseSafe=true")
+        raise RuntimeError(
+            "Manifest is not publicReleaseSafe=true"
+        )
 
     if not manifest_sha:
-        raise RuntimeError("Manifest missing sha256/packageSha256")
+        raise RuntimeError(
+            "Manifest missing sha256/packageSha256"
+        )
 
-    package_sha = os.environ.get("EDGESWARM_INSTALL_PACKAGE_SHA256", "").strip().lower() or manifest_sha
-    download_url = os.environ.get("EDGESWARM_INSTALL_DOWNLOAD_URL", "").strip() or str(manifest.get("downloadUrl") or "")
+    package_sha = (
+        os.environ.get(
+            "EDGESWARM_INSTALL_PACKAGE_SHA256",
+            "",
+        ).strip().lower()
+        or str(
+            packaged_metadata.get("packageSha256")
+            or ""
+        ).strip().lower()
+    )
+
+    download_url = (
+        os.environ.get(
+            "EDGESWARM_INSTALL_DOWNLOAD_URL",
+            "",
+        ).strip()
+        or str(
+            packaged_metadata.get("downloadUrl")
+            or ""
+        ).strip()
+    )
+
+    package_type_matches = (
+        manifest_package_type == packaged_package_type
+    )
+
+    hash_recognized = bool(
+        manifest.get("hashRecognized")
+        and package_type_matches
+        and package_sha
+        and package_sha == manifest_sha
+    )
+
+    if hash_recognized:
+        hash_status = (
+            manifest.get("hashStatus")
+            or "recognized_public_beta_package"
+        )
+    elif not package_sha:
+        hash_status = (
+            "installed_package_hash_unavailable"
+        )
+    elif not package_type_matches:
+        hash_status = (
+            "manifest_package_type_mismatch"
+        )
+    else:
+        hash_status = (
+            "package_hash_pending_manifest_update"
+        )
 
     metadata = {
-        "releaseMetadataVersion": "linux_release_metadata_v1",
+        "releaseMetadataVersion":
+            "linux_release_metadata_v1",
         "platform": "linux",
         "version": current_version,
-        "releaseChannel": manifest.get("releaseChannel") or "public_beta",
-        "packageType": manifest.get("packageType") or "tar.gz",
+        "appVersion": current_version,
+        "releaseChannel": (
+            packaged_metadata.get("releaseChannel")
+            or manifest.get("releaseChannel")
+            or "public_beta"
+        ),
+        "packageType": packaged_package_type,
         "packageSha256": package_sha,
         "downloadUrl": download_url,
+        "manifestPackageType": manifest_package_type,
         "manifestSha256": manifest_sha,
-        "hashRecognized": bool(manifest.get("hashRecognized")) and package_sha == manifest_sha,
-        "hashStatus": (manifest.get("hashStatus") or "recognized_public_beta_package") if package_sha == manifest_sha else "package_hash_pending_manifest_update",
-        "publicReleaseSafe": bool(manifest.get("publicReleaseSafe")),
-        "signatureType": manifest.get("signatureType") or "unsigned_public_beta",
-        "signerStatus": manifest.get("signerStatus") or "unsigned_public_beta",
+        "hashRecognized": hash_recognized,
+        "hashStatus": hash_status,
+        "publicReleaseSafe": bool(
+            packaged_public_release_safe
+            and manifest.get("publicReleaseSafe") is True
+            and package_type_matches
+        ),
+        "signatureType": (
+            packaged_metadata.get("signatureType")
+            or manifest.get("signatureType")
+            or "unsigned_public_beta"
+        ),
+        "signerStatus": (
+            packaged_metadata.get("signerStatus")
+            or manifest.get("signerStatus")
+            or "unsigned_public_beta"
+        ),
+        "notes": (
+            packaged_metadata.get("notes")
+            or (
+                f"Linux v{current_version} "
+                f"{packaged_package_type} package."
+            )
+        ),
         "writtenAt": int(time.time()),
     }
 
-    (install_dir / "RELEASE_METADATA.json").write_text(json.dumps(metadata, indent=2) + "\n")
-    (install_dir / "RELEASE_SHA256").write_text(package_sha + "\n")
+    (install_dir / "RELEASE_METADATA.json").write_text(
+        json.dumps(metadata, indent=2) + "\n"
+    )
+
+    release_sha_path = install_dir / "RELEASE_SHA256"
+
+    if package_sha:
+        release_sha_path.write_text(package_sha + "\n")
+    else:
+        release_sha_path.unlink(missing_ok=True)
 
     print(json.dumps(metadata, indent=2))
 

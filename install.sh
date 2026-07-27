@@ -14,6 +14,10 @@ UPDATER_NAME="edgeswarm-node-updater"
 SERVICE_USER="${EDGESWARM_SERVICE_USER:-edgeswarm}"
 SOURCE_PYTHON="$SRC_DIR/runtime/bin/edgeswarm-python"
 
+systemd_is_running() {
+  command -v systemctl >/dev/null 2>&1     && [[ -d /run/systemd/system ]]     && [[ "$(cat /proc/1/comm 2>/dev/null || true)" == "systemd" ]]
+}
+
 SUPABASE_URL_DEFAULT=https://xrmwmoqgukjztboemvgi.supabase.co
 SUPABASE_ANON_KEY_DEFAULT=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhybXdtb3FndWtqenRib2VtdmdpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk3MzgzNDcsImV4cCI6MjA5NTMxNDM0N30.3kP1uRFgRAgr2L2eh3Su36icRUHMEsfYIJc1RBV1jjM
 
@@ -163,6 +167,31 @@ PY_METADATA
     echo "[EdgeSwarm] Validating public release metadata."
 
     "$INSTALL_DIR/runtime/bin/edgeswarm-python"       "$INSTALL_DIR/scripts/edgeswarm_linux_release_metadata.py"       --install-dir "$INSTALL_DIR"       --api-base "${EDGESWARM_API_BASE_URL:-https://api.edgeswarm.io}"
+
+    PACKAGED_PUBLIC_RELEASE_SAFE="$(
+      "$INSTALL_DIR/runtime/bin/edgeswarm-python" - "$INSTALL_DIR/RELEASE_METADATA.json" <<'PY_RECHECK_RELEASE_SAFETY'
+import json
+import sys
+from pathlib import Path
+
+try:
+    data = json.loads(
+        Path(sys.argv[1]).read_text()
+    )
+    print(
+        "true"
+        if data.get("publicReleaseSafe") is True
+        else "false"
+    )
+except Exception:
+    print("false")
+PY_RECHECK_RELEASE_SAFETY
+    )"
+
+    if [[ "$PACKAGED_PUBLIC_RELEASE_SAFE" != "true" ]]; then
+      echo "[EdgeSwarm] No matching public update manifest exists for this package type."
+      echo "[EdgeSwarm] Automatic updates will remain disabled."
+    fi
   else
     echo "[EdgeSwarm] Preserving packaged private-candidate release metadata."
   fi
@@ -254,35 +283,40 @@ if [[ -f "$INSTALL_DIR/desktop/edgeswarm-node.desktop" ]]; then
   fi
 fi
 
-systemctl daemon-reload
+if systemd_is_running; then
+  systemctl daemon-reload
 
-if [[ "$START_NODE_AFTER_INSTALL" == "1" ]]; then
-  systemctl enable "${SERVICE_NAME}.service"
-else
-  echo "[EdgeSwarm] Node service remains disabled until authentication succeeds."
-  systemctl disable --now "${SERVICE_NAME}.service" 2>/dev/null || true
-fi
-
-if [[ -f "/etc/systemd/system/${UPDATER_NAME}.timer" ]]; then
-  if [[ "$PACKAGED_PUBLIC_RELEASE_SAFE" == "true" ]]; then
-    systemctl enable "${UPDATER_NAME}.timer"
+  if [[ "$START_NODE_AFTER_INSTALL" == "1" ]]; then
+    systemctl enable "${SERVICE_NAME}.service"
   else
-    echo "[EdgeSwarm] Private candidate: updater timer remains disabled."
-    systemctl disable --now "${UPDATER_NAME}.timer" 2>/dev/null || true
+    echo "[EdgeSwarm] Node service remains disabled until authentication succeeds."
+    systemctl disable --now "${SERVICE_NAME}.service" 2>/dev/null || true
   fi
-fi
 
-if [[ "$START_NODE_AFTER_INSTALL" == "1" ]]; then
-  echo "[EdgeSwarm] Enabling and restarting authenticated node service."
-  systemctl restart "${SERVICE_NAME}.service" || true
+  if [[ -f "/etc/systemd/system/${UPDATER_NAME}.timer" ]]; then
+    if [[ "$PACKAGED_PUBLIC_RELEASE_SAFE" == "true" ]]; then
+      systemctl enable "${UPDATER_NAME}.timer"
+    else
+      echo "[EdgeSwarm] Private candidate: updater timer remains disabled."
+      systemctl disable --now "${UPDATER_NAME}.timer" 2>/dev/null || true
+    fi
+  fi
+
+  if [[ "$START_NODE_AFTER_INSTALL" == "1" ]]; then
+    echo "[EdgeSwarm] Enabling and restarting authenticated node service."
+    systemctl restart "${SERVICE_NAME}.service" || true
+  else
+    echo "[EdgeSwarm] Node service installed but not started yet."
+    echo "[EdgeSwarm] Authenticate with email/password/2FA first, then start the node."
+    systemctl stop "${SERVICE_NAME}.service" || true
+
+    if [[       -f "/etc/systemd/system/${UPDATER_NAME}.timer"       && "$PACKAGED_PUBLIC_RELEASE_SAFE" == "true"     ]]; then
+      systemctl restart "${UPDATER_NAME}.timer"
+    fi
+  fi
 else
-  echo "[EdgeSwarm] Node service installed but not started yet."
-  echo "[EdgeSwarm] Authenticate with email/password/2FA first, then start the node."
-  systemctl stop "${SERVICE_NAME}.service" || true
-
-  if [[     -f "/etc/systemd/system/${UPDATER_NAME}.timer"     && "$PACKAGED_PUBLIC_RELEASE_SAFE" == "true"   ]]; then
-    systemctl restart "${UPDATER_NAME}.timer"
-  fi
+  echo "[EdgeSwarm] systemd is not running as PID 1."
+  echo "[EdgeSwarm] Unit files were installed, but service activation was skipped."
 fi
 
 echo "[EdgeSwarm] Install complete."

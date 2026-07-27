@@ -40,6 +40,52 @@ def current_arch():
     return machine or "unknown"
 
 
+
+def normalize_package_type(value):
+    package_type = str(value or "").strip().lower()
+
+    aliases = {
+        "debian": "deb",
+        "application/x-debian-package": "deb",
+        "rpm": "rpm",
+        "application/x-rpm": "rpm",
+        "application/x-redhat-package-manager": "rpm",
+        "tgz": "tar.gz",
+        "source": "tar.gz",
+        "tar": "tar.gz",
+    }
+
+    return aliases.get(package_type, package_type)
+
+
+def read_installed_package_type(install_dir):
+    install_dir = Path(install_dir)
+
+    for filename in (
+        "PACKAGE_MANIFEST.json",
+        "RELEASE_METADATA.json",
+    ):
+        path = install_dir / filename
+
+        if not path.exists():
+            continue
+
+        try:
+            data = json.loads(
+                path.read_text(errors="ignore")
+            )
+        except Exception:
+            continue
+
+        package_type = normalize_package_type(
+            data.get("packageType")
+        )
+
+        if package_type:
+            return package_type
+
+    return ""
+
 def version_key(value):
     parts = []
 
@@ -175,11 +221,31 @@ def main():
 
     load_env_file(args.env_file)
 
-    current_version = read_current_version(args.install_dir)
+    current_version = read_current_version(
+        args.install_dir
+    )
+
+    installed_package_type = (
+        read_installed_package_type(
+            args.install_dir
+        )
+    )
+
+    if installed_package_type not in (
+        "deb",
+        "rpm",
+        "tar.gz",
+    ):
+        raise RuntimeError(
+            "Unable to determine supported installed "
+            f"package type: {installed_package_type or 'missing'}"
+        )
+
     query = urllib.parse.urlencode({
         "platform": "linux",
         "version": current_version,
         "arch": current_arch(),
+        "packageType": installed_package_type,
         "t": int(time.time()),
     })
 
@@ -191,22 +257,15 @@ def main():
     latest_version = str(manifest.get("latestVersion") or manifest.get("version") or "").strip().lstrip("v")
     update_available = bool(manifest.get("updateAvailable"))
     download_url = str(manifest.get("downloadUrl") or "").strip()
-    expected_sha = str(manifest.get("sha256") or "").strip().lower()
-
-    package_type = str(
-        manifest.get("packageType") or ""
+    expected_sha = str(
+        manifest.get("sha256")
+        or manifest.get("packageSha256")
+        or ""
     ).strip().lower()
 
-    if package_type in (
-        "debian",
-        "application/x-debian-package",
-    ):
-        package_type = "deb"
-    elif package_type in (
-        "tgz",
-        "source",
-    ):
-        package_type = "tar.gz"
+    package_type = normalize_package_type(
+        manifest.get("packageType")
+    )
 
     if not package_type:
         download_path = urllib.parse.urlparse(
@@ -215,6 +274,8 @@ def main():
 
         if download_path.endswith(".deb"):
             package_type = "deb"
+        elif download_path.endswith(".rpm"):
+            package_type = "rpm"
         elif (
             download_path.endswith(".tar.gz")
             or download_path.endswith(".tgz")
@@ -225,6 +286,7 @@ def main():
 
     print(json.dumps({
         "currentVersion": current_version,
+        "installedPackageType": installed_package_type,
         "latestVersion": latest_version,
         "updateAvailable": update_available,
         "downloadUrlPresent": bool(download_url),
@@ -254,7 +316,18 @@ def main():
     if manifest.get("publicReleaseSafe") is not True:
         raise RuntimeError("Refusing update because manifest publicReleaseSafe is not true.")
 
-    if package_type not in ("deb", "tar.gz"):
+    if package_type != installed_package_type:
+        raise RuntimeError(
+            "Update package type mismatch: "
+            f"installed={installed_package_type}, "
+            f"manifest={package_type}"
+        )
+
+    if package_type not in (
+        "deb",
+        "rpm",
+        "tar.gz",
+    ):
         raise RuntimeError(
             f"Unsupported update package type: {package_type}"
         )
@@ -267,9 +340,17 @@ def main():
         tmp_dir = Path(tmp)
 
         if package_type == "deb":
-            package_path = tmp_dir / "edgeswarm-node-update.deb"
+            package_path = (
+                tmp_dir / "edgeswarm-node-update.deb"
+            )
+        elif package_type == "rpm":
+            package_path = (
+                tmp_dir / "edgeswarm-node-update.rpm"
+            )
         else:
-            package_path = tmp_dir / "edgeswarm-node-update.tar.gz"
+            package_path = (
+                tmp_dir / "edgeswarm-node-update.tar.gz"
+            )
 
         print(f"[edgeswarm-updater] downloading: {download_url}")
         download_file(download_url, package_path)
@@ -288,7 +369,9 @@ def main():
         }
 
         if package_type == "deb":
-            install_env["DEBIAN_FRONTEND"] = "noninteractive"
+            install_env[
+                "DEBIAN_FRONTEND"
+            ] = "noninteractive"
 
             run(
                 [
@@ -299,21 +382,63 @@ def main():
                 ],
                 extra_env=install_env,
             )
+
+        elif package_type == "rpm":
+            if shutil.which("dnf"):
+                command = [
+                    "dnf",
+                    "install",
+                    "-y",
+                    "--nogpgcheck",
+                    str(package_path),
+                ]
+            elif shutil.which("yum"):
+                command = [
+                    "yum",
+                    "localinstall",
+                    "-y",
+                    str(package_path),
+                ]
+            elif shutil.which("rpm"):
+                command = [
+                    "rpm",
+                    "-Uvh",
+                    "--replacepkgs",
+                    str(package_path),
+                ]
+            else:
+                raise RuntimeError(
+                    "No RPM package manager is available."
+                )
+
+            run(
+                command,
+                extra_env=install_env,
+            )
+
         else:
             extract_dir = tmp_dir / "extract"
-            extract_dir.mkdir(parents=True, exist_ok=True)
+            extract_dir.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
 
             safe_extract_tar_gz(
                 package_path,
                 extract_dir,
             )
 
-            package_root = find_package_root(extract_dir)
+            package_root = find_package_root(
+                extract_dir
+            )
 
             run(
                 [
                     "bash",
-                    str(package_root / "install.sh"),
+                    str(
+                        package_root
+                        / "install.sh"
+                    ),
                     "--auto-update",
                 ],
                 cwd=str(package_root),

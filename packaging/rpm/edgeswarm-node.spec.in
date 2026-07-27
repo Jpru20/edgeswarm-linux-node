@@ -1,0 +1,62 @@
+# EdgeSwarm ships a prebuilt, self-contained native runtime.
+# RPM binary stripping corrupts bundled NumPy/OpenBLAS and invalidates
+# PACKAGE_MANIFEST.json hashes, so preserve the payload byte-for-byte.
+%global __os_install_post %{nil}
+%global debug_package %{nil}
+
+Name:           edgeswarm-node
+Version:        @VERSION@
+Release:        1
+Summary:        EdgeSwarm Linux compute node
+License:        Proprietary
+URL:            https://edgeswarm.io
+BuildArch:      @RPM_ARCH@
+AutoReqProv:    no
+Requires:       glibc >= 2.34
+Requires:       libgcc
+Requires:       systemd
+Source0:        edgeswarm-node-package.tar.gz
+
+%description
+Self-contained desktop and headless EdgeSwarm node with deterministic and
+local neural inference support.
+
+%prep
+%setup -q -n edgeswarm-node-package
+
+%build
+
+%install
+rm -rf %{buildroot}
+mkdir -p %{buildroot}/usr/lib/edgeswarm-node-package
+cp -a . %{buildroot}/usr/lib/edgeswarm-node-package/
+
+%post
+export EDGESWARM_SKIP_SYSTEM_PACKAGES=1
+bash /usr/lib/edgeswarm-node-package/install.sh
+
+%preun
+if [ "$1" -eq 0 ]; then
+  systemctl disable --now edgeswarm-node.service 2>/dev/null || true
+  systemctl disable --now edgeswarm-node-updater.timer 2>/dev/null || true
+fi
+
+%postun
+if [ "$1" -eq 0 ]; then
+  rm -f /etc/systemd/system/edgeswarm-node.service
+  rm -f /etc/systemd/system/edgeswarm-node-updater.service
+  rm -f /etc/systemd/system/edgeswarm-node-updater.timer
+  rm -f /usr/local/bin/edgeswarm
+  rm -f /usr/share/applications/edgeswarm-node.desktop
+  rm -rf /opt/edgeswarm-node
+
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl reset-failed 2>/dev/null || true
+
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database /usr/share/applications 2>/dev/null || true
+  fi
+fi
+
+%files
+/usr/lib/edgeswarm-node-package

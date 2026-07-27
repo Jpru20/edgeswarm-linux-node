@@ -1,10 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/opt/edgeswarm-node"
-PYTHON="$ROOT/.venv/bin/python"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+INSTALLED_ROOT="${EDGESWARM_INSTALLED_ROOT:-/opt/edgeswarm-node}"
 STANDALONE_RUNTIME="${EDGESWARM_STANDALONE_RUNTIME:-}"
-VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
+
+if [[ -x "$ROOT/runtime/bin/edgeswarm-python" ]]; then
+  PYTHON="$ROOT/runtime/bin/edgeswarm-python"
+elif [[ -x "$INSTALLED_ROOT/.venv/bin/python" ]]; then
+  PYTHON="$INSTALLED_ROOT/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON="$(command -v python3)"
+else
+  echo "No usable Python interpreter found for package validation." >&2
+  exit 1
+fi
+
+VERSION="$(tr -d "[:space:]" < "$ROOT/VERSION")"
 RELEASE_MODE="${1:-}"
 
 if [[ -z "$RELEASE_MODE" ]]; then
@@ -18,10 +30,12 @@ case "$(uname -m)" in
   x86_64|amd64)
     PACKAGE_ARCH="x64"
     DEB_ARCH="amd64"
+    RPM_ARCH="x86_64"
     ;;
   aarch64|arm64)
     PACKAGE_ARCH="arm64"
     DEB_ARCH="arm64"
+    RPM_ARCH="aarch64"
     ;;
   *)
     echo "Unsupported architecture: $(uname -m)" >&2
@@ -62,6 +76,7 @@ esac
 LABEL="EdgeSwarm_Linux_${PACKAGE_ARCH}_v${VERSION}_${RELEASE_LABEL}"
 TAR_PATH="$RELEASE_DIR/${LABEL}.tar.gz"
 DEB_PATH="$RELEASE_DIR/${LABEL}.deb"
+RPM_PATH="$RELEASE_DIR/${LABEL}.rpm"
 
 cleanup() {
   rm -rf "$TMP"
@@ -92,12 +107,17 @@ copy_release_source() {
     -cf - . \
   | tar -xf - -C "$destination"
 
-  if [[ "$package_type" == "deb" ]]; then
-    echo "[EdgeSwarm] Embedding standalone runtime."
-    mkdir -p "$destination/runtime"
-    tar -C "$STANDALONE_RUNTIME" -cf - . | tar -xf - -C "$destination/runtime"
-    test -x "$destination/runtime/bin/edgeswarm-python"
-  fi
+  case "$package_type" in
+    deb|rpm|tar.gz)
+      echo "[EdgeSwarm] Embedding shared standalone runtime for $package_type."
+      mkdir -p "$destination/runtime"
+      tar -C "$STANDALONE_RUNTIME" -cf - . | tar -xf - -C "$destination/runtime"
+      test -x "$destination/runtime/bin/edgeswarm-python"
+      rm -f "$destination/runtime/lib/edgeswarm-native/libgcc_s.so.1"
+      test ! -e "$destination/runtime/lib/edgeswarm-native/libgcc_s.so.1"
+      echo "[EdgeSwarm] Using distribution-provided libgcc_s.so.1."
+      ;;
+  esac
 
   "$PYTHON" -     "$destination"     "$VERSION"     "$package_type"     "$RELEASE_CHANNEL"     "$PUBLIC_RELEASE_SAFE"     "$HASH_STATUS"     "$SIGNATURE_TYPE"     "$SIGNER_STATUS"     "$RELEASE_KIND" <<'PY'
 import json
@@ -213,15 +233,43 @@ PY
 }
 
 echo "=== PREFLIGHT ==="
+
+PREFLIGHT_ROOT="$TMP/preflight-source"
+mkdir -p "$PREFLIGHT_ROOT"
+
+tar \
+  --exclude=".git" \
+  --exclude=".venv" \
+  --exclude="runtime" \
+  --exclude="release" \
+  --exclude="__pycache__" \
+  --exclude="*.pyc" \
+  --exclude="*.gguf" \
+  --exclude="*.before_*" \
+  --exclude="*.backup_*" \
+  -C "$ROOT" \
+  -cf - . \
+| tar -xf - -C "$PREFLIGHT_ROOT"
+
+chmod a+rx "$TMP"
+chmod -R a+rX "$PREFLIGHT_ROOT"
+
+PREFLIGHT_PYCACHE="$TMP/preflight-pycache"
+mkdir -p "$PREFLIGHT_PYCACHE"
+chmod 1777 "$PREFLIGHT_PYCACHE"
+
 sudo -u edgeswarm env \
   HOME=/home/edgeswarm \
+  PYTHONPYCACHEPREFIX="$PREFLIGHT_PYCACHE" \
   XDG_DATA_HOME=/home/edgeswarm/.local/share \
   EDGESWARM_MODEL_DIR=/var/lib/edgeswarm-node/models \
   EDGESWARM_PYTHON="$PYTHON" \
-  bash "$ROOT/scripts/preflight_linux_neural_ready.sh"
+  bash "$PREFLIGHT_ROOT/scripts/preflight_linux_neural_ready.sh"
+
+sudo chown -R "$(id -u):$(id -g)" "$PREFLIGHT_PYCACHE"
 
 mkdir -p "$RELEASE_DIR"
-rm -f "$TAR_PATH" "$DEB_PATH"
+rm -f "$TAR_PATH" "$DEB_PATH" "$RPM_PATH"
 
 echo
 echo "=== BUILD TAR.GZ ==="
@@ -250,7 +298,7 @@ Section: utils
 Priority: optional
 Architecture: ${DEB_ARCH}
 Maintainer: EdgeSwarm <support@edgeswarm.io>
-Depends: libc6 (>= 2.35), systemd
+Depends: libc6 (>= 2.34), libgcc-s1, systemd
 Description: EdgeSwarm Linux compute node
  Self-contained desktop and headless EdgeSwarm node with deterministic and
  local neural inference support.
@@ -310,10 +358,43 @@ dpkg-deb \
   "$DEB_PATH"
 
 echo
+echo "=== BUILD RPM ==="
+
+RPM_TOPDIR="$TMP/rpmbuild"
+RPM_SOURCE_ROOT="$TMP/edgeswarm-node-package"
+RPM_SPEC="$RPM_TOPDIR/SPECS/edgeswarm-node.spec"
+
+mkdir -p "$RPM_TOPDIR"/BUILD
+mkdir -p "$RPM_TOPDIR"/BUILDROOT
+mkdir -p "$RPM_TOPDIR"/RPMS
+mkdir -p "$RPM_TOPDIR"/SOURCES
+mkdir -p "$RPM_TOPDIR"/SPECS
+mkdir -p "$RPM_TOPDIR"/SRPMS
+
+copy_release_source "$RPM_SOURCE_ROOT" "rpm"
+
+tar   -C "$TMP"   -czf "$RPM_TOPDIR/SOURCES/edgeswarm-node-package.tar.gz"   "edgeswarm-node-package"
+
+sed   -e "s/@VERSION@/${VERSION}/g"   -e "s/@RPM_ARCH@/${RPM_ARCH}/g"   "$ROOT/packaging/rpm/edgeswarm-node.spec.in"   > "$RPM_SPEC"
+
+rpmbuild   --define "_topdir $RPM_TOPDIR"   -bb "$RPM_SPEC"
+
+BUILT_RPM="$(
+  find "$RPM_TOPDIR/RPMS"     -type f     -name "edgeswarm-node-*.rpm"     -print     -quit
+)"
+
+if [[ -z "$BUILT_RPM" ]]; then
+  echo "RPM build completed without an artifact." >&2
+  exit 1
+fi
+
+cp "$BUILT_RPM" "$RPM_PATH"
+
+echo
 echo "=== PACKAGE RESULTS ==="
 
-ls -lh "$TAR_PATH" "$DEB_PATH"
-sha256sum "$TAR_PATH" "$DEB_PATH"
+ls -lh "$TAR_PATH" "$DEB_PATH" "$RPM_PATH"
+sha256sum "$TAR_PATH" "$DEB_PATH" "$RPM_PATH"
 
 echo
 echo "=== EMBEDDED HASHES ==="
@@ -335,4 +416,5 @@ PY
 echo
 echo "TAR_PATH=$TAR_PATH"
 echo "DEB_PATH=$DEB_PATH"
+echo "RPM_PATH=$RPM_PATH"
 echo "PACKAGE_BUILD_PASS=true"
