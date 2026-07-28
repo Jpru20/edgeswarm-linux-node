@@ -184,7 +184,7 @@ jobs:
             manifest_architecture="$(jq -r ".architecture // empty" "$manifest")"
             manifest_package_type="$(jq -r ".packageType // empty" "$manifest")"
             manifest_runtime_sha="$(jq -r ".runtimeSha256 // empty" "$manifest")"
-            manifest_neural_sha="$(jq -r ".neuralSha256 // empty" "$manifest")"
+            manifest_neural_sha="$(jq -r ".neuralModuleSha256 // empty" "$manifest")"
 
             echo "RPM_MANIFEST_VERSION=$manifest_version"
             echo "RPM_MANIFEST_ARCHITECTURE=$manifest_architecture"
