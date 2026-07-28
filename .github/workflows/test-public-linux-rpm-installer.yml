@@ -176,11 +176,51 @@ jobs:
             test "$cli_status" -eq 0
             echo "RPM_CLI_HELP_PASS=true"
 
-            test "$(jq -r ".version" "$manifest")" = "0.1.8"
-            test "$(jq -r ".architecture" "$manifest")" = "x64"
-            test "$(jq -r ".packageType" "$manifest")" = "rpm"
-            test "$(jq -r ".runtimeSha256" "$manifest")" = "6eab4ab2660febe2758708d94f0f52a57fbb9b323568ca13a83eaa73c0694e42"
-            test "$(jq -r ".neuralSha256" "$manifest")" = "6c1103a2ab9bf7707511ccc4fcd83dacfbc5faf57c4a77b9b7b86b936d17d9b6"
+            echo "=== INSTALLED PACKAGE MANIFEST ==="
+            cat "$manifest"
+            echo
+
+            manifest_version="$(jq -r ".version // empty" "$manifest")"
+            manifest_architecture="$(jq -r ".architecture // empty" "$manifest")"
+            manifest_package_type="$(jq -r ".packageType // empty" "$manifest")"
+            manifest_runtime_sha="$(jq -r ".runtimeSha256 // empty" "$manifest")"
+            manifest_neural_sha="$(jq -r ".neuralSha256 // empty" "$manifest")"
+
+            echo "RPM_MANIFEST_VERSION=$manifest_version"
+            echo "RPM_MANIFEST_ARCHITECTURE=$manifest_architecture"
+            echo "RPM_MANIFEST_PACKAGE_TYPE=$manifest_package_type"
+            echo "RPM_MANIFEST_RUNTIME_SHA256=$manifest_runtime_sha"
+            echo "RPM_MANIFEST_NEURAL_SHA256=$manifest_neural_sha"
+
+            if [[ "$manifest_version" != "0.1.8" ]]
+            then
+              echo "ERROR: Expected manifest version 0.1.8."
+              exit 1
+            fi
+
+            if [[ "$manifest_architecture" != "x64" ]]
+            then
+              echo "ERROR: Expected manifest architecture x64."
+              exit 1
+            fi
+
+            if [[ "$manifest_package_type" != "rpm" ]]
+            then
+              echo "ERROR: Expected manifest packageType rpm."
+              exit 1
+            fi
+
+            if [[ "$manifest_runtime_sha" != "6eab4ab2660febe2758708d94f0f52a57fbb9b323568ca13a83eaa73c0694e42" ]]
+            then
+              echo "ERROR: Runtime SHA256 mismatch."
+              exit 1
+            fi
+
+            if [[ "$manifest_neural_sha" != "6c1103a2ab9bf7707511ccc4fcd83dacfbc5faf57c4a77b9b7b86b936d17d9b6" ]]
+            then
+              echo "ERROR: Neural SHA256 mismatch."
+              exit 1
+            fi
 
             echo "RPM_PACKAGE_MANIFEST_PASS=true"
 
