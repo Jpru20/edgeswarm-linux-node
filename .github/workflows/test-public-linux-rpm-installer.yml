@@ -136,8 +136,45 @@ jobs:
 
             rpm -qa | grep -Ei "^edgeswarm-node" >/dev/null
 
-            command -v edgeswarm
-            edgeswarm --help >/dev/null
+            cli_path="$(command -v edgeswarm)"
+            echo "RPM_CLI_PATH=$cli_path"
+            test -n "$cli_path"
+
+            echo "=== DISCOVER INSTALLED CLI FILES ==="
+            for candidate in               /usr/local/bin/edgeswarm               /usr/local/sbin/edgeswarm
+            do
+              if [[ -e "$candidate" || -L "$candidate" ]]
+              then
+                echo "RPM_CLI_CANDIDATE=$candidate"
+                ls -la "$candidate"
+                readlink -f "$candidate" || true
+                rpm -qf "$candidate" || true
+              fi
+            done
+
+            resolved_cli="$(readlink -f "$cli_path")"
+            cli_file="$(file -L "$cli_path")"
+
+            echo "RPM_CLI_RESOLVED_PATH=$resolved_cli"
+            echo "RPM_CLI_FILE=$cli_file"
+
+            test -n "$resolved_cli"
+            test -e "$resolved_cli"
+
+            echo "=== RESOLVED CLI CONTENT ==="
+            sed -n "1,180p" "$resolved_cli"
+
+            echo "=== RUN CLI HELP ==="
+            set +e
+            cli_output="$("$cli_path" --help 2>&1)"
+            cli_status=$?
+            set -e
+
+            printf "%s\n" "$cli_output"
+            echo "RPM_CLI_HELP_EXIT=$cli_status"
+
+            test "$cli_status" -eq 0
+            echo "RPM_CLI_HELP_PASS=true"
 
             test "$(jq -r ".version" "$manifest")" = "0.1.8"
             test "$(jq -r ".architecture" "$manifest")" = "x64"
