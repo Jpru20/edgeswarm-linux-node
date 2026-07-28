@@ -61,6 +61,34 @@ jobs:
               rpm \
               rpm2cpio
 
+      - name: Prepare build service user
+        run: |
+          set -euo pipefail
+
+          if ! id edgeswarm >/dev/null 2>&1; then
+            sudo useradd \
+              --system \
+              --create-home \
+              --home-dir /home/edgeswarm \
+              --shell /usr/sbin/nologin \
+              edgeswarm
+          fi
+
+          sudo mkdir -p \
+            /var/lib/edgeswarm-node/models \
+            /var/log/edgeswarm-node
+
+          sudo chown -R \
+            edgeswarm:edgeswarm \
+            /home/edgeswarm \
+            /var/lib/edgeswarm-node \
+            /var/log/edgeswarm-node
+
+          id edgeswarm
+          getent passwd edgeswarm
+
+          echo "ARM64_BUILD_SERVICE_USER_PASS=true"
+
       - name: Build standalone ARM64 runtime
         shell: bash
         run: |
