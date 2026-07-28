@@ -170,35 +170,38 @@ jobs:
           RPM="$GITHUB_WORKSPACE/release/EdgeSwarm_Linux_arm64_v${VERSION}_PublicBeta.rpm"
           TAR="$GITHUB_WORKSPACE/release/EdgeSwarm_Linux_arm64_v${VERSION}_PublicBeta.tar.gz"
 
+          rm -rf \
+            /tmp/edgeswarm-extracted
+
           mkdir -p \
-            "$RUNNER_TEMP/deb-root" \
-            "$RUNNER_TEMP/rpm-root" \
-            "$RUNNER_TEMP/tar-root"
+            "/tmp/edgeswarm-extracted/deb-root" \
+            "/tmp/edgeswarm-extracted/rpm-root" \
+            "/tmp/edgeswarm-extracted/tar-root"
 
           dpkg-deb \
             -x "$DEB" \
-            "$RUNNER_TEMP/deb-root"
+            "/tmp/edgeswarm-extracted/deb-root"
 
           (
-            cd "$RUNNER_TEMP/rpm-root"
+            cd "/tmp/edgeswarm-extracted/rpm-root"
 
             rpm2cpio "$RPM" |
               cpio -idm --quiet
           )
 
           tar -xzf "$TAR" \
-            -C "$RUNNER_TEMP/tar-root"
+            -C "/tmp/edgeswarm-extracted/tar-root"
 
       - name: Validate extracted ARM64 runtimes
         shell: bash
         run: |
           set -euo pipefail
 
-          DEB_ROOT="$RUNNER_TEMP/deb-root/usr/lib/edgeswarm-node-package"
-          RPM_ROOT="$RUNNER_TEMP/rpm-root/usr/lib/edgeswarm-node-package"
+          DEB_ROOT="/tmp/edgeswarm-extracted/deb-root/usr/lib/edgeswarm-node-package"
+          RPM_ROOT="/tmp/edgeswarm-extracted/rpm-root/usr/lib/edgeswarm-node-package"
 
           TAR_ROOT="$(
-            find "$RUNNER_TEMP/tar-root" \
+            find "/tmp/edgeswarm-extracted/tar-root" \
               -mindepth 1 \
               -maxdepth 1 \
               -type d \
@@ -211,12 +214,49 @@ jobs:
             "$RPM_ROOT" \
             "$TAR_ROOT"
           do
-            test -x \
-              "$ROOT/runtime/bin/edgeswarm-python"
+            echo
+            echo "VALIDATING_EXTRACTED_ROOT=$ROOT"
 
-            file \
-              "$ROOT/runtime/bin/python3" |
-              grep -Ei 'ARM aarch64|aarch64'
+            test -d "$ROOT" || {
+              echo "ERROR: Extracted package root missing: $ROOT"
+              exit 1
+            }
+
+            ls -ld \
+              "$ROOT" \
+              "$ROOT/runtime" \
+              "$ROOT/runtime/bin"
+
+            ls -l \
+              "$ROOT/runtime/bin/edgeswarm-python" \
+              "$ROOT/runtime/bin/python3"
+
+            echo "EDGESWARM_PYTHON_TARGET=$(
+              readlink -f \
+                "$ROOT/runtime/bin/edgeswarm-python"
+            )"
+
+            if [[ ! -x "$ROOT/runtime/bin/edgeswarm-python" ]]; then
+              echo "ERROR: Packaged Python launcher is not executable:"
+              echo "$ROOT/runtime/bin/edgeswarm-python"
+
+              mount |
+                grep -E ' /tmp |runner|work/_temp' ||
+                true
+
+              exit 1
+            fi
+
+            PYTHON_FILE="$(
+              file \
+                "$ROOT/runtime/bin/python3"
+            )"
+
+            echo "PYTHON_FILE=$PYTHON_FILE"
+
+            grep -Ei \
+              'ARM aarch64|aarch64' \
+              <<<"$PYTHON_FILE"
 
             "$ROOT/runtime/bin/edgeswarm-python" \
               - "$ROOT" <<'PY'
