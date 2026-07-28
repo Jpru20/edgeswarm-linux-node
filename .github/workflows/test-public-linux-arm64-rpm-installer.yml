@@ -1,0 +1,286 @@
+name: Test Public Linux ARM64 RPM Installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rpm-install-test:
+    name: ARM64 Fedora RPM public install
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 35
+
+    steps:
+      - name: Confirm host architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          machine="$(uname -m)"
+          echo "HOST_MACHINE=$machine"
+
+          case "$machine" in
+            aarch64|arm64)
+              ;;
+            *)
+              echo "Expected an ARM64 GitHub runner."
+              exit 1
+              ;;
+          esac
+
+      - name: Build Fedora systemd test container
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p /tmp/edgeswarm-rpm-test
+
+          printf '%s\n' \
+            'FROM fedora:42' \
+            'ENV container=docker' \
+            'RUN dnf -y install bash curl file findutils jq procps-ng python3 rpm shadow-utils systemd util-linux && dnf clean all' \
+            'RUN systemctl mask dev-hugepages.mount sys-fs-fuse-connections.mount systemd-remount-fs.service getty.target console-getty.service || true' \
+            'STOPSIGNAL SIGRTMIN+3' \
+            'CMD ["/sbin/init"]' \
+            > /tmp/edgeswarm-rpm-test/Dockerfile
+
+          docker build \
+            --tag edgeswarm-fedora-arm64-rpm-test:v0.1.8 \
+            /tmp/edgeswarm-rpm-test
+
+      - name: Start clean Fedora systemd container
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker run \
+            --detach \
+            --name edgeswarm-fedora-arm64-rpm-test \
+            --privileged \
+            --cgroupns=host \
+            --tmpfs /tmp \
+            --tmpfs /run \
+            --tmpfs /run/lock \
+            --volume /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            edgeswarm-fedora-arm64-rpm-test:v0.1.8
+
+          ready=false
+
+          for attempt in $(seq 1 30)
+          do
+            state="$(
+              docker exec edgeswarm-fedora-arm64-rpm-test \
+                systemctl is-system-running 2>/dev/null ||
+              true
+            )"
+
+            echo "SYSTEMD_STATE=$state"
+
+            if [[ "$state" = "running" || "$state" = "degraded" ]]; then
+              ready=true
+              break
+            fi
+
+            sleep 2
+          done
+
+          test "$ready" = "true"
+
+      - name: Install from public universal installer
+        env:
+          INSTALLER_URL: https://github.com/Jpru20/edgeswarm-linux-node/releases/download/v0.1.8/install-linux.sh
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker exec \
+            --env INSTALLER_URL="$INSTALLER_URL" \
+            edgeswarm-fedora-arm64-rpm-test \
+            bash -lc '
+              set -euo pipefail
+
+              curl \
+                --fail \
+                --location \
+                --retry 4 \
+                --retry-delay 2 \
+                --connect-timeout 15 \
+                --max-time 120 \
+                --output /tmp/install-linux.sh \
+                "$INSTALLER_URL"
+
+              bash -n /tmp/install-linux.sh
+              chmod 0755 /tmp/install-linux.sh
+              bash /tmp/install-linux.sh
+            '
+
+      - name: Validate installed v0.1.8 RPM package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker exec edgeswarm-fedora-arm64-rpm-test bash -lc '
+            set -euo pipefail
+
+            root=/opt/edgeswarm-node
+            manifest="$root/PACKAGE_MANIFEST.json"
+
+            test -d "$root"
+            test -f "$manifest"
+            test -f /etc/edgeswarm-node.env
+            test -f /etc/systemd/system/edgeswarm-node.service
+            test -f /etc/systemd/system/edgeswarm-node-updater.service
+            test -f /etc/systemd/system/edgeswarm-node-updater.timer
+
+            rpm -qa | grep -Ei "^edgeswarm-node" >/dev/null
+
+            cli_path="$(command -v edgeswarm)"
+            echo "RPM_CLI_PATH=$cli_path"
+            test -n "$cli_path"
+
+            echo "=== DISCOVER INSTALLED CLI FILES ==="
+            for candidate in               /usr/local/bin/edgeswarm               /usr/local/sbin/edgeswarm
+            do
+              if [[ -e "$candidate" || -L "$candidate" ]]
+              then
+                echo "RPM_CLI_CANDIDATE=$candidate"
+                ls -la "$candidate"
+                readlink -f "$candidate" || true
+                rpm -qf "$candidate" || true
+              fi
+            done
+
+            resolved_cli="$(readlink -f "$cli_path")"
+            cli_file="$(file -L "$cli_path")"
+
+            echo "RPM_CLI_RESOLVED_PATH=$resolved_cli"
+            echo "RPM_CLI_FILE=$cli_file"
+
+            test -n "$resolved_cli"
+            test -e "$resolved_cli"
+
+            echo "=== RESOLVED CLI CONTENT ==="
+            sed -n "1,180p" "$resolved_cli"
+
+            echo "=== RUN CLI HELP ==="
+            set +e
+            cli_output="$("$cli_path" --help 2>&1)"
+            cli_status=$?
+            set -e
+
+            printf "%s\n" "$cli_output"
+            echo "RPM_CLI_HELP_EXIT=$cli_status"
+
+            test "$cli_status" -eq 0
+            echo "RPM_CLI_HELP_PASS=true"
+
+            echo "=== INSTALLED PACKAGE MANIFEST ==="
+            cat "$manifest"
+            echo
+
+            manifest_version="$(jq -r ".version // empty" "$manifest")"
+            manifest_architecture="$(jq -r ".architecture // empty" "$manifest")"
+            manifest_package_type="$(jq -r ".packageType // empty" "$manifest")"
+            manifest_runtime_sha="$(jq -r ".runtimeSha256 // empty" "$manifest")"
+            manifest_neural_sha="$(jq -r ".neuralModuleSha256 // empty" "$manifest")"
+
+            echo "RPM_MANIFEST_VERSION=$manifest_version"
+            echo "RPM_MANIFEST_ARCHITECTURE=$manifest_architecture"
+            echo "RPM_MANIFEST_PACKAGE_TYPE=$manifest_package_type"
+            echo "RPM_MANIFEST_RUNTIME_SHA256=$manifest_runtime_sha"
+            echo "RPM_MANIFEST_NEURAL_SHA256=$manifest_neural_sha"
+
+            if [[ "$manifest_version" != "0.1.8" ]]
+            then
+              echo "ERROR: Expected manifest version 0.1.8."
+              exit 1
+            fi
+
+            if [[ "$manifest_architecture" != "arm64" ]]
+            then
+              echo "ERROR: Expected manifest architecture arm64."
+              exit 1
+            fi
+
+            if [[ "$manifest_package_type" != "rpm" ]]
+            then
+              echo "ERROR: Expected manifest packageType rpm."
+              exit 1
+            fi
+
+            if [[ "$manifest_runtime_sha" != "6eab4ab2660febe2758708d94f0f52a57fbb9b323568ca13a83eaa73c0694e42" ]]
+            then
+              echo "ERROR: Runtime SHA256 mismatch."
+              exit 1
+            fi
+
+            if [[ "$manifest_neural_sha" != "6c1103a2ab9bf7707511ccc4fcd83dacfbc5faf57c4a77b9b7b86b936d17d9b6" ]]
+            then
+              echo "ERROR: Neural SHA256 mismatch."
+              exit 1
+            fi
+
+            echo "RPM_PACKAGE_MANIFEST_PASS=true"
+
+            runtime_python="$root/runtime/bin/python3"
+
+            test -x "$runtime_python"
+
+            file -L "$runtime_python" |
+              grep -Eiq "aarch64|arm64"
+
+            "$runtime_python" -c "import requests, psutil, supabase, customtkinter, eth_account, llama_cpp; print(\"RPM_RUNTIME_IMPORTS_PASS=true\")"
+
+            id edgeswarm >/dev/null
+
+            runuser -u edgeswarm -- test -r "$manifest"
+            runuser -u edgeswarm -- test -x "$runtime_python"
+
+            systemctl daemon-reload
+
+            systemctl cat edgeswarm-node.service --no-pager >/dev/null
+            systemctl cat edgeswarm-node-updater.service --no-pager >/dev/null
+            systemctl cat edgeswarm-node-updater.timer --no-pager >/dev/null
+
+            if systemctl is-active --quiet edgeswarm-node.service
+            then
+              echo "Unauthenticated clean installation started edgeswarm-node."
+              exit 1
+            fi
+
+            echo "RPM_UNAUTHENTICATED_NODE_INACTIVE_PASS=true"
+            echo "PUBLIC_RPM_INSTALL_VALIDATION_PASS=true"
+          '
+
+      - name: Print failure diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+
+          docker ps -a
+          docker logs edgeswarm-fedora-arm64-rpm-test
+
+          docker exec edgeswarm-fedora-arm64-rpm-test \
+            bash -lc '
+              set +e
+
+              cat /etc/os-release
+              uname -a
+              rpm -qa | grep -Ei "edgeswarm|systemd"
+              find /opt/edgeswarm-node -maxdepth 3 \( -type f -o -type l \) -print
+              systemctl status edgeswarm-node.service --no-pager
+              systemctl status edgeswarm-node-updater.service --no-pager
+              systemctl status edgeswarm-node-updater.timer --no-pager
+              journalctl -u edgeswarm-node.service --no-pager -n 200
+              journalctl -u edgeswarm-node-updater.service --no-pager -n 200
+            '
+
+      - name: Stop Fedora test container
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          docker rm --force edgeswarm-fedora-arm64-rpm-test
