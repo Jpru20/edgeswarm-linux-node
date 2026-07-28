@@ -22,7 +22,17 @@ case "$(uname -m)" in
     ;;
 esac
 
-if command -v apt-get >/dev/null 2>&1; then
+if [[ "${EDGESWARM_FORCE_TAR_INSTALL:-0}" = "1" ]]; then
+  PACKAGE_TYPE="tar.gz"
+
+  for tool in curl python3 tar sha256sum; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "Required command is missing: $tool" >&2
+      exit 1
+    fi
+  done
+
+elif command -v apt-get >/dev/null 2>&1; then
   PACKAGE_TYPE="deb"
 
   apt-get update
@@ -249,13 +259,16 @@ case "$PACKAGE_TYPE" in
       find "$EXTRACT_DIR" \
         -maxdepth 2 \
         -type f \
-        -name install.sh \
+        \( \
+          -name install.sh \
+          -o -name install-linux.sh \
+        \) \
         -print \
         -quit
     )"
 
     if [[ -z "$INSTALL_SCRIPT" ]]; then
-      echo "Downloaded tarball has no install.sh." >&2
+      echo "Downloaded tarball has no install.sh or install-linux.sh." >&2
       exit 1
     fi
 
