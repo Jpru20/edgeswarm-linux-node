@@ -96,7 +96,7 @@ jobs:
 
           bash \
             scripts/build_arm64_standalone_runtime.sh \
-            "$RUNNER_TEMP/edgeswarm-arm64-runtime"
+            "/tmp/edgeswarm-arm64-runtime"
 
       - name: Prepare package-builder Python
         shell: bash
@@ -104,34 +104,31 @@ jobs:
           set -euo pipefail
 
           mkdir -p \
-            "$RUNNER_TEMP/build-root/.venv/bin"
+            "/tmp/edgeswarm-build-root/.venv/bin"
 
           ln -sfn \
-            "$RUNNER_TEMP/edgeswarm-arm64-runtime/bin/edgeswarm-python" \
-            "$RUNNER_TEMP/build-root/.venv/bin/python"
+            "/tmp/edgeswarm-arm64-runtime/bin/edgeswarm-python" \
+            "/tmp/edgeswarm-build-root/.venv/bin/python"
 
-          # The package preflight runs as the edgeswarm service user.
-          # Grant read/traverse access to the temporary runtime trees.
-          chmod a+rx \
-            "$RUNNER_TEMP"
-
+          # These shared build roots live under /tmp so both the
+          # GitHub runner and the edgeswarm service user can access them.
           chmod -R a+rX \
-            "$RUNNER_TEMP/edgeswarm-arm64-runtime" \
-            "$RUNNER_TEMP/build-root"
+            /tmp/edgeswarm-arm64-runtime \
+            /tmp/edgeswarm-build-root
 
           sudo -u edgeswarm test -x \
-            "$RUNNER_TEMP/build-root/.venv/bin/python"
+            /tmp/edgeswarm-build-root/.venv/bin/python
 
           sudo -u edgeswarm env \
             HOME=/home/edgeswarm \
-            "$RUNNER_TEMP/build-root/.venv/bin/python" \
+            /tmp/edgeswarm-build-root/.venv/bin/python \
             -c 'import platform, sys; machine = platform.machine().lower(); assert machine in {"aarch64", "arm64"}; print("PACKAGE_BUILDER_PYTHON=" + sys.executable); print("PACKAGE_BUILDER_MACHINE=" + machine); print("ARM64_PACKAGE_BUILDER_USER_ACCESS_PASS=true")'
 
       - name: Build ARM64 packages
         shell: bash
         env:
-          EDGESWARM_STANDALONE_RUNTIME: ${{ runner.temp }}/edgeswarm-arm64-runtime
-          EDGESWARM_INSTALLED_ROOT: ${{ runner.temp }}/build-root
+          EDGESWARM_STANDALONE_RUNTIME: /tmp/edgeswarm-arm64-runtime
+          EDGESWARM_INSTALLED_ROOT: /tmp/edgeswarm-build-root
         run: |
           set -euo pipefail
 
