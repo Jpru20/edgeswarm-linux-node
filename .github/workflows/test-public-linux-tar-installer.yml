@@ -1,0 +1,149 @@
+name: Test Public Linux Tarball Installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install-test:
+    name: ${{ matrix.expected_architecture }} public tar.gz install
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            expected_architecture: x64
+            expected_machine_pattern: x86-64
+          - runner: ubuntu-24.04-arm
+            expected_architecture: arm64
+            expected_machine_pattern: aarch64
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+
+    steps:
+      - name: Confirm clean runner architecture
+        shell: bash
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.expected_architecture }}
+        run: |
+          set -euo pipefail
+
+          MACHINE="$(uname -m)"
+          echo "RUNNER_MACHINE=$MACHINE"
+          echo "EXPECTED_ARCHITECTURE=$EXPECTED_ARCHITECTURE"
+
+          case "$EXPECTED_ARCHITECTURE:$MACHINE" in
+            x64:x86_64|arm64:aarch64|arm64:arm64)
+              ;;
+            *)
+              echo "Unexpected runner architecture." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Install public tar.gz through universal installer
+        shell: bash
+        env:
+          INSTALLER_URL: https://github.com/Jpru20/edgeswarm-linux-node/releases/download/v0.1.8/install-linux.sh
+          EDGESWARM_FORCE_TAR_INSTALL: "1"
+        run: |
+          set -euo pipefail
+
+          curl \
+            --fail \
+            --location \
+            --retry 4 \
+            --retry-delay 2 \
+            --connect-timeout 15 \
+            --max-time 120 \
+            --output /tmp/install-linux.sh \
+            "$INSTALLER_URL"
+
+          bash -n /tmp/install-linux.sh
+          chmod 0755 /tmp/install-linux.sh
+
+          sudo env EDGESWARM_FORCE_TAR_INSTALL="$EDGESWARM_FORCE_TAR_INSTALL" bash /tmp/install-linux.sh
+
+      - name: Validate installed v0.1.8 package
+        shell: bash
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.expected_architecture }}
+          EXPECTED_MACHINE_PATTERN: ${{ matrix.expected_machine_pattern }}
+        run: |
+          set -euo pipefail
+
+          ROOT="/opt/edgeswarm-node"
+          MANIFEST="$ROOT/PACKAGE_MANIFEST.json"
+
+          test -d "$ROOT"
+          test -s "$MANIFEST"
+          test -x "$ROOT/runtime/bin/edgeswarm-python"
+          test -e "$ROOT/runtime/bin/python3"
+          test -f /etc/edgeswarm-node.env
+
+          CLI="$(command -v edgeswarm)"
+          test -x "$CLI"
+          echo "INSTALLED_CLI=$CLI"
+
+          python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); expected=sys.argv[2]; assert m["version"]=="0.1.8",m; assert m["architecture"]==expected,m; assert m["packageType"]=="tar.gz",m; assert m["runtimeSha256"]=="6eab4ab2660febe2758708d94f0f52a57fbb9b323568ca13a83eaa73c0694e42",m; assert m["neuralModuleSha256"]=="6c1103a2ab9bf7707511ccc4fcd83dacfbc5faf57c4a77b9b7b86b936d17d9b6",m; print("INSTALLED_MANIFEST_PASS="+expected+"/tar.gz")' "$MANIFEST" "$EXPECTED_ARCHITECTURE"
+
+          PYTHON_FILE="$(file -L "$ROOT/runtime/bin/python3")"
+          echo "INSTALLED_PYTHON_FILE=$PYTHON_FILE"
+          grep -Ei "$EXPECTED_MACHINE_PATTERN" <<<"$PYTHON_FILE"
+
+          "$ROOT/runtime/bin/edgeswarm-python" \
+            -c 'import requests, psutil, supabase, customtkinter, eth_account, llama_cpp; print("INSTALLED_RUNTIME_IMPORTS_PASS=true")'
+
+          id edgeswarm
+          sudo -u edgeswarm test -r "$MANIFEST"
+          sudo -u edgeswarm test -x "$ROOT/runtime/bin/edgeswarm-python"
+
+          systemctl cat edgeswarm-node.service --no-pager
+          systemctl cat edgeswarm-node-updater.service --no-pager
+          systemctl cat edgeswarm-node-updater.timer --no-pager
+
+          SERVICE_STATE="$(systemctl is-active edgeswarm-node.service || true)"
+          echo "EDGESWARM_NODE_SERVICE_STATE=$SERVICE_STATE"
+
+          if [[ "$SERVICE_STATE" = "active" ]]; then
+            echo "Unauthenticated clean installation unexpectedly started the node service." >&2
+            exit 1
+          fi
+
+          echo "PUBLIC_TAR_INSTALL_VALIDATION_PASS=$EXPECTED_ARCHITECTURE"
+
+      - name: Print failure diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          set +e
+
+          echo "=== PACKAGE FILES ==="
+          find /opt/edgeswarm-node \
+            -maxdepth 3 \
+            -printf '%M %u %g %p\n' \
+            2>/dev/null | sort
+
+          echo "=== NODE SERVICE ==="
+          systemctl status edgeswarm-node.service \
+            --no-pager \
+            --full
+
+          echo "=== UPDATER SERVICE ==="
+          systemctl status edgeswarm-node-updater.service \
+            --no-pager \
+            --full
+
+          echo "=== UPDATER TIMER ==="
+          systemctl status edgeswarm-node-updater.timer \
+            --no-pager \
+            --full
+
+          echo "=== NODE JOURNAL ==="
+          journalctl \
+            -u edgeswarm-node.service \
+            -n 200 \
+            --no-pager
