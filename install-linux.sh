@@ -259,13 +259,21 @@ case "$PACKAGE_TYPE" in
       find "$EXTRACT_DIR" \
         -maxdepth 2 \
         -type f \
-        \( \
-          -name install.sh \
-          -o -name install-linux.sh \
-        \) \
+        -name install.sh \
         -print \
         -quit
     )"
+
+    if [[ -z "$INSTALL_SCRIPT" ]]; then
+      INSTALL_SCRIPT="$(
+        find "$EXTRACT_DIR" \
+          -maxdepth 2 \
+          -type f \
+          -name install-linux.sh \
+          -print \
+          -quit
+      )"
+    fi
 
     if [[ -z "$INSTALL_SCRIPT" ]]; then
       echo "Downloaded tarball has no install.sh or install-linux.sh." >&2
