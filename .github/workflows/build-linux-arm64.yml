@@ -248,7 +248,7 @@ jobs:
             fi
 
             PYTHON_FILE="$(
-              file \
+              file -L \
                 "$ROOT/runtime/bin/python3"
             )"
 
