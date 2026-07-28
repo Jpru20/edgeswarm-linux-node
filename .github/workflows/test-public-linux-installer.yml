@@ -61,7 +61,7 @@ jobs:
             --output /tmp/install-linux.sh \
             "$INSTALLER_URL"
 
-          bash -n /tmp/install-hinux.sh
+          bash -n /tmp/install-linux.sh
           chmod 0755 /tmp/install-linux.sh
 
           sudo bash /tmp/install-linux.sh
