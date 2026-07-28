@@ -110,6 +110,23 @@ jobs:
             "$RUNNER_TEMP/edgeswarm-arm64-runtime/bin/edgeswarm-python" \
             "$RUNNER_TEMP/build-root/.venv/bin/python"
 
+          # The package preflight runs as the edgeswarm service user.
+          # Grant read/traverse access to the temporary runtime trees.
+          chmod a+rx \
+            "$RUNNER_TEMP"
+
+          chmod -R a+rX \
+            "$RUNNER_TEMP/edgeswarm-arm64-runtime" \
+            "$RUNNER_TEMP/build-root"
+
+          sudo -u edgeswarm test -x \
+            "$RUNNER_TEMP/build-root/.venv/bin/python"
+
+          sudo -u edgeswarm env \
+            HOME=/home/edgeswarm \
+            "$RUNNER_TEMP/build-root/.venv/bin/python" \
+            -c 'import platform, sys; machine = platform.machine().lower(); assert machine in {"aarch64", "arm64"}; print("PACKAGE_BUILDER_PYTHON=" + sys.executable); print("PACKAGE_BUILDER_MACHINE=" + machine); print("ARM64_PACKAGE_BUILDER_USER_ACCESS_PASS=true")'
+
       - name: Build ARM64 packages
         shell: bash
         env:
