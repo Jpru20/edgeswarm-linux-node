@@ -15,6 +15,12 @@ AutoReqProv:    no
 Requires:       glibc >= 2.34
 Requires:       libgcc
 Requires:       systemd
+Requires:       libgomp
+Requires:       libX11
+Requires:       libXext
+Requires:       libXrender
+Requires:       libXft
+Requires:       fontconfig
 Source0:        edgeswarm-node-package.tar.gz
 
 %description

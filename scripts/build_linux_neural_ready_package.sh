@@ -298,7 +298,7 @@ Section: utils
 Priority: optional
 Architecture: ${DEB_ARCH}
 Maintainer: EdgeSwarm <support@edgeswarm.io>
-Depends: libc6 (>= 2.34), libgcc-s1, systemd
+Depends: libc6 (>= 2.34), libgcc-s1, libgomp1, systemd, libx11-6, libxext6, libxrender1, libxft2, fontconfig
 Description: EdgeSwarm Linux compute node
  Self-contained desktop and headless EdgeSwarm node with deterministic and
  local neural inference support.

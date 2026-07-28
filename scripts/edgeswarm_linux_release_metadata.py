@@ -88,7 +88,23 @@ def main():
         f"{args.api_base.rstrip('/')}"
         f"/v1/node/update-manifest?{query}"
     )
-    manifest = fetch_json(manifest_url)
+    manifest_error = None
+
+    try:
+        manifest = fetch_json(manifest_url)
+    except Exception as exc:
+        manifest = {}
+        manifest_error = (
+            f"{type(exc).__name__}: {exc}"
+        )
+
+        print(
+            "[EdgeSwarm] Matching remote manifest "
+            "is not available; installation will "
+            "continue with automatic updates disabled. "
+            f"{manifest_error}",
+            file=sys.stderr,
+        )
 
     manifest_version = str(
         manifest.get("version")
@@ -120,12 +136,15 @@ def main():
             file=sys.stderr,
         )
 
-    if manifest.get("publicReleaseSafe") is not True:
+    if (
+        manifest
+        and manifest.get("publicReleaseSafe") is not True
+    ):
         raise RuntimeError(
             "Manifest is not publicReleaseSafe=true"
         )
 
-    if not manifest_sha:
+    if manifest and not manifest_sha:
         raise RuntimeError(
             "Manifest missing sha256/packageSha256"
         )
@@ -164,7 +183,9 @@ def main():
         and package_sha == manifest_sha
     )
 
-    if hash_recognized:
+    if not manifest:
+        hash_status = "manifest_unavailable"
+    elif hash_recognized:
         hash_status = (
             manifest.get("hashStatus")
             or "recognized_public_beta_package"
@@ -203,6 +224,7 @@ def main():
         "manifestVersion": manifest_version,
         "manifestPackageType": manifest_package_type,
         "manifestSha256": manifest_sha,
+        "manifestError": manifest_error,
         "hashRecognized": hash_recognized,
         "hashStatus": hash_status,
         "publicReleaseSafe": bool(

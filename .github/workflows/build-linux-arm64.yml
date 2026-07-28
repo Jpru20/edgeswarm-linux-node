@@ -1,0 +1,268 @@
+name: Build Linux ARM64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Confirm native ARM64 runner
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "$(uname -m)" in
+            aarch64|arm64)
+              ;;
+            *)
+              echo "Expected a native ARM64 runner."
+              exit 1
+              ;;
+          esac
+
+          uname -a
+          ldd --version | head -1
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+
+          sudo DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y \
+              build-essential \
+              ca-certificates \
+              cmake \
+              cpio \
+              curl \
+              file \
+              fontconfig \
+              git \
+              libfontconfig1 \
+              libgcc-s1 \
+              libgomp1 \
+              libx11-6 \
+              libxext6 \
+              libxft2 \
+              libxrender1 \
+              ninja-build \
+              pkg-config \
+              rpm \
+              rpm2cpio
+
+      - name: Build standalone ARM64 runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          bash \
+            scripts/build_arm64_standalone_runtime.sh \
+            "$RUNNER_TEMP/edgeswarm-arm64-runtime"
+
+      - name: Prepare package-builder Python
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p \
+            "$RUNNER_TEMP/build-root/.venv/bin"
+
+          ln -sfn \
+            "$RUNNER_TEMP/edgeswarm-arm64-runtime/bin/edgeswarm-python" \
+            "$RUNNER_TEMP/build-root/.venv/bin/python"
+
+      - name: Build ARM64 packages
+        shell: bash
+        env:
+          EDGESWARM_STANDALONE_RUNTIME: ${{ runner.temp }}/edgeswarm-arm64-runtime
+          EDGESWARM_INSTALLED_ROOT: ${{ runner.temp }}/build-root
+        run: |
+          set -euo pipefail
+
+          bash \
+            scripts/build_linux_neural_ready_package.sh \
+            --public-beta
+
+      - name: Validate package metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+
+          DEB="release/EdgeSwarm_Linux_arm64_v${VERSION}_PublicBeta.deb"
+          RPM="release/EdgeSwarm_Linux_arm64_v${VERSION}_PublicBeta.rpm"
+          TAR="release/EdgeSwarm_Linux_arm64_v${VERSION}_PublicBeta.tar.gz"
+
+          test -f "$DEB"
+          test -f "$RPM"
+          test -f "$TAR"
+
+          test "$(dpkg-deb -f "$DEB" Version)" = "$VERSION"
+          test "$(dpkg-deb -f "$DEB" Architecture)" = "arm64"
+
+          test "$(rpm -qp --queryformat '%{VERSION}' "$RPM")" = "$VERSION"
+          test "$(rpm -qp --queryformat '%{ARCH}' "$RPM")" = "aarch64"
+
+          echo "ARM64_PACKAGE_METADATA_PASS=true"
+
+      - name: Extract package formats
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+
+          DEB="$GITHUB_WORKSPACE/release/EdgeSwarm_Linux_arm64_v${VERSION}_PublicBeta.deb"
+          RPM="$GITHUB_WORKSPACE/release/EdgeSwarm_Linux_arm64_v${VERSION}_PublicBeta.rpm"
+          TAR="$GITHUB_WORKSPACE/release/EdgeSwarm_Linux_arm64_v${VERSION}_PublicBeta.tar.gz"
+
+          mkdir -p \
+            "$RUNNER_TEMP/deb-root" \
+            "$RUNNER_TEMP/rpm-root" \
+            "$RUNNER_TEMP/tar-root"
+
+          dpkg-deb \
+            -x "$DEB" \
+            "$RUNNER_TEMP/deb-root"
+
+          (
+            cd "$RUNNER_TEMP/rpm-root"
+
+            rpm2cpio "$RPM" |
+              cpio -idm --quiet
+          )
+
+          tar -xzf "$TAR" \
+            -C "$RUNNER_TEMP/tar-root"
+
+      - name: Validate extracted ARM64 runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DEB_ROOT="$RUNNER_TEMP/deb-root/usr/lib/edgeswarm-node-package"
+          RPM_ROOT="$RUNNER_TEMP/rpm-root/usr/lib/edgeswarm-node-package"
+
+          TAR_ROOT="$(
+            find "$RUNNER_TEMP/tar-root" \
+              -mindepth 1 \
+              -maxdepth 1 \
+              -type d \
+              -print \
+              -quit
+          )"
+
+          for ROOT in \
+            "$DEB_ROOT" \
+            "$RPM_ROOT" \
+            "$TAR_ROOT"
+          do
+            test -x \
+              "$ROOT/runtime/bin/edgeswarm-python"
+
+            file \
+              "$ROOT/runtime/bin/python3" |
+              grep -Ei 'ARM aarch64|aarch64'
+
+            "$ROOT/runtime/bin/edgeswarm-python" \
+              - "$ROOT" <<'PY'
+          import hashlib
+          import json
+          import platform
+          import sys
+          from pathlib import Path
+
+          from eth_account import Account
+          from llama_cpp import llama_cpp
+
+          root = Path(sys.argv[1])
+
+          manifest = json.loads(
+              (root / "PACKAGE_MANIFEST.json").read_text()
+          )
+
+          runtime_path = root / "edgeswarm_node.py"
+
+          actual_runtime_sha = hashlib.sha256(
+              runtime_path.read_bytes()
+          ).hexdigest()
+
+          assert platform.machine().lower() in {
+              "aarch64",
+              "arm64",
+          }
+
+          assert manifest["version"] == "0.1.8"
+          assert manifest["architecture"] == "arm64"
+
+          assert manifest["packageType"] in {
+              "deb",
+              "rpm",
+              "tar.gz",
+          }
+
+          assert (
+              actual_runtime_sha
+              == manifest["runtimeSha256"]
+          )
+
+          assert hasattr(
+              llama_cpp,
+              "llama_backend_init",
+          )
+
+          assert Account.create().address
+
+          print(
+              "VALIDATED_PACKAGE_TYPE="
+              + manifest["packageType"]
+          )
+          PY
+          done
+
+          echo "ARM64_EXTRACTED_RUNTIME_PASS=true"
+
+      - name: Create ARM64 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+
+          cd release
+
+          sha256sum \
+            "EdgeSwarm_Linux_arm64_v${VERSION}_PublicBeta.deb" \
+            "EdgeSwarm_Linux_arm64_v${VERSION}_PublicBeta.rpm" \
+            "EdgeSwarm_Linux_arm64_v${VERSION}_PublicBeta.tar.gz" \
+            > "EdgeSwarm_Linux_arm64_v${VERSION}_SHA256SUMS.txt"
+
+          sha256sum -c \
+            "EdgeSwarm_Linux_arm64_v${VERSION}_SHA256SUMS.txt"
+
+          cat \
+            "EdgeSwarm_Linux_arm64_v${VERSION}_SHA256SUMS.txt"
+
+      - name: Upload ARM64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: edgeswarm-linux-arm64-v0.1.8
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            release/EdgeSwarm_Linux_arm64_v0.1.8_PublicBeta.deb
+            release/EdgeSwarm_Linux_arm64_v0.1.8_PublicBeta.rpm
+            release/EdgeSwarm_Linux_arm64_v0.1.8_PublicBeta.tar.gz
+            release/EdgeSwarm_Linux_arm64_v0.1.8_SHA256SUMS.txt

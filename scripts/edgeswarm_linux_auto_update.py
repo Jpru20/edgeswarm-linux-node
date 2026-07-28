@@ -31,13 +31,20 @@ def load_env_file(path):
         os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
-def current_arch():
-    machine = platform.machine().lower()
-    if machine in ("x86_64", "amd64"):
+def normalize_arch(value):
+    machine = str(value or "").strip().lower()
+
+    if machine in ("x86_64", "amd64", "x64"):
         return "x64"
+
     if machine in ("aarch64", "arm64"):
         return "arm64"
+
     return machine or "unknown"
+
+
+def current_arch():
+    return normalize_arch(platform.machine())
 
 
 
@@ -100,29 +107,25 @@ def version_key(value):
 
 
 def read_current_version(install_dir):
-    candidates = []
+    install_dir = Path(install_dir)
 
     env_version = os.environ.get(
         "EDGESWARM_NODE_VERSION",
         "",
     ).strip().lstrip("v")
 
-    if env_version:
-        candidates.append(env_version)
-
-    version_file = Path(install_dir) / "VERSION"
+    version_file_value = ""
+    version_file = install_dir / "VERSION"
 
     if version_file.exists():
-        version = (
+        version_file_value = (
             version_file.read_text(errors="ignore")
             .strip()
             .lstrip("v")
         )
 
-        if version:
-            candidates.append(version)
-
-    runtime_file = Path(install_dir) / "edgeswarm_node.py"
+    runtime_version = ""
+    runtime_file = install_dir / "edgeswarm_node.py"
 
     if runtime_file.exists():
         for line in runtime_file.read_text(
@@ -130,23 +133,48 @@ def read_current_version(install_dir):
         ).splitlines():
             stripped = line.strip()
 
-            if stripped.startswith("APP_VERSION") and "=" in stripped:
+            if (
+                stripped.startswith("APP_VERSION")
+                and "=" in stripped
+            ):
                 runtime_version = (
                     stripped.split("=", 1)[1]
                     .strip()
                     .strip("'\"")
                     .lstrip("v")
                 )
-
-                if runtime_version:
-                    candidates.append(runtime_version)
-
                 break
 
-    if not candidates:
-        return "0.0.0"
+    if (
+        version_file_value
+        and runtime_version
+        and version_file_value != runtime_version
+    ):
+        raise RuntimeError(
+            "Installed version mismatch: "
+            f"VERSION={version_file_value}, "
+            f"APP_VERSION={runtime_version}"
+        )
 
-    return max(candidates, key=version_key)
+    installed_version = (
+        runtime_version
+        or version_file_value
+        or env_version
+        or "0.0.0"
+    )
+
+    if (
+        env_version
+        and installed_version != env_version
+    ):
+        print(
+            "[edgeswarm-updater] ignoring stale "
+            "EDGESWARM_NODE_VERSION="
+            f"{env_version}; installed files report "
+            f"{installed_version}"
+        )
+
+    return installed_version
 
 
 def fetch_json(url):
@@ -283,6 +311,20 @@ def main():
             package_type = "tar.gz"
         else:
             package_type = "unknown"
+
+    manifest_arch = normalize_arch(
+        manifest.get("architecture")
+        or manifest.get("arch")
+    )
+
+    installed_arch = current_arch()
+
+    if manifest_arch != installed_arch:
+        raise RuntimeError(
+            "Update architecture mismatch: "
+            f"installed={installed_arch}, "
+            f"manifest={manifest_arch}"
+        )
 
     print(json.dumps({
         "currentVersion": current_version,
@@ -445,7 +487,120 @@ def main():
                 extra_env=install_env,
             )
 
-    print("[edgeswarm-updater] update installed successfully")
+    installed_version = read_current_version(
+        args.install_dir
+    )
+
+    if installed_version != latest_version:
+        raise RuntimeError(
+            "Post-install version verification failed: "
+            f"installed={installed_version}, "
+            f"expected={latest_version}"
+        )
+
+    installed_package_type_after = (
+        read_installed_package_type(
+            args.install_dir
+        )
+    )
+
+    if (
+        installed_package_type_after
+        != installed_package_type
+    ):
+        raise RuntimeError(
+            "Post-install package type changed: "
+            f"before={installed_package_type}, "
+            f"after={installed_package_type_after}"
+        )
+
+    expected_runtime_sha = str(
+        manifest.get("runtimeSha256")
+        or ""
+    ).strip().lower()
+
+    installed_runtime_path = (
+        Path(args.install_dir)
+        / "edgeswarm_node.py"
+    )
+
+    actual_runtime_sha = ""
+
+    if expected_runtime_sha:
+        if not installed_runtime_path.is_file():
+            raise RuntimeError(
+                "Installed runtime file is missing."
+            )
+
+        actual_runtime_sha = sha256_file(
+            installed_runtime_path
+        )
+
+        if actual_runtime_sha != expected_runtime_sha:
+            raise RuntimeError(
+                "Post-install runtime SHA256 mismatch: "
+                f"expected={expected_runtime_sha}, "
+                f"actual={actual_runtime_sha}"
+            )
+
+    post_query = urllib.parse.urlencode({
+        "platform": "linux",
+        "version": installed_version,
+        "arch": current_arch(),
+        "packageType":
+            installed_package_type_after,
+        "t": int(time.time()),
+    })
+
+    post_manifest_url = (
+        f"{args.api_base.rstrip('/')}"
+        f"/v1/node/update-manifest?"
+        f"{post_query}"
+    )
+
+    post_manifest = fetch_json(
+        post_manifest_url
+    )
+
+    post_latest_version = str(
+        post_manifest.get("latestVersion")
+        or post_manifest.get("version")
+        or ""
+    ).strip().lstrip("v")
+
+    if post_latest_version != installed_version:
+        raise RuntimeError(
+            "Post-install manifest version mismatch: "
+            f"installed={installed_version}, "
+            f"manifest={post_latest_version}"
+        )
+
+    if post_manifest.get("updateAvailable") is True:
+        raise RuntimeError(
+            "Post-install manifest still reports an "
+            "available update. Update loop blocked."
+        )
+
+    print(json.dumps({
+        "postInstallVersion":
+            installed_version,
+        "postInstallArchitecture":
+            current_arch(),
+        "postInstallPackageType":
+            installed_package_type_after,
+        "postInstallRuntimeSha256":
+            actual_runtime_sha or None,
+        "postInstallUpdateAvailable":
+            post_manifest.get("updateAvailable"),
+        "postInstallVerification":
+            "passed",
+    }, indent=2))
+
+    print(
+        "[edgeswarm-updater] update installed "
+        "and verified successfully"
+    )
+
     return 0
 
 
