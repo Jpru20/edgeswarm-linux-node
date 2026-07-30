@@ -47,7 +47,7 @@ jobs:
             > /tmp/edgeswarm-rpm-test/Dockerfile
 
           docker build \
-            --tag edgeswarm-fedora-rpm-test:v0.1.8 \
+            --tag edgeswarm-fedora-rpm-test:v0.1.9 \
             /tmp/edgeswarm-rpm-test
 
       - name: Start clean Fedora systemd container
@@ -64,7 +64,7 @@ jobs:
             --tmpfs /run \
             --tmpfs /run/lock \
             --volume /sys/fs/cgroup:/sys/fs/cgroup:rw \
-            edgeswarm-fedora-rpm-test:v0.1.8
+            edgeswarm-fedora-rpm-test:v0.1.9
 
           ready=false
 
@@ -90,7 +90,7 @@ jobs:
 
       - name: Install from public universal installer
         env:
-          INSTALLER_URL: https://github.com/Jpru20/edgeswarm-linux-node/releases/download/v0.1.8/install-linux.sh
+          INSTALLER_URL: https://github.com/Jpru20/edgeswarm-linux-node/releases/download/v0.1.9/install-linux.sh
         shell: bash
         run: |
           set -euo pipefail
@@ -116,7 +116,7 @@ jobs:
               bash /tmp/install-linux.sh
             '
 
-      - name: Validate installed v0.1.8 RPM package
+      - name: Validate installed v0.1.9 RPM package
         shell: bash
         run: |
           set -euo pipefail
