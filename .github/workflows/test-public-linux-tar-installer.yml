@@ -47,7 +47,7 @@ jobs:
       - name: Install public tar.gz through universal installer
         shell: bash
         env:
-          INSTALLER_URL: https://github.com/Jpru20/edgeswarm-linux-node/releases/download/v0.1.9/install-linux.sh
+          INSTALLER_URL: https://github.com/Jpru20/edgeswarm-linux-node/releases/download/v0.1.10/install-linux.sh
           EDGESWARM_FORCE_TAR_INSTALL: "1"
         run: |
           set -euo pipefail
@@ -67,7 +67,7 @@ jobs:
 
           sudo env EDGESWARM_FORCE_TAR_INSTALL="$EDGESWARM_FORCE_TAR_INSTALL" bash /tmp/install-linux.sh
 
-      - name: Validate installed v0.1.9 package
+      - name: Validate installed v0.1.10 package
         shell: bash
         env:
           EXPECTED_ARCHITECTURE: ${{ matrix.expected_architecture }}
@@ -88,7 +88,7 @@ jobs:
           test -x "$CLI"
           echo "INSTALLED_CLI=$CLI"
 
-          python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); expected=sys.argv[2]; assert m["version"]=="0.1.9",m; assert m["architecture"]==expected,m; assert m["packageType"]=="tar.gz",m; assert m["runtimeSha256"]=="b5c008fa89b447880dc0b95d5aac3218afa7bbb834062fbffd95b29af4aca7e0",m; assert m["neuralModuleSha256"]=="839d61276658b1be20102f7b3333f3ad871d68e3cbaec18b4c21eb3267c4383d",m; print("INSTALLED_MANIFEST_PASS="+expected+"/tar.gz")' "$MANIFEST" "$EXPECTED_ARCHITECTURE"
+          python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); expected=sys.argv[2]; assert m["version"]=="0.1.10",m; assert m["architecture"]==expected,m; assert m["packageType"]=="tar.gz",m; assert m["runtimeSha256"]=="a75587c72e1dd52ba4d5f83cb8429161e80c563ece8d6ec4b483b859cf4fe87c",m; assert m["neuralModuleSha256"]=="839d61276658b1be20102f7b3333f3ad871d68e3cbaec18b4c21eb3267c4383d",m; print("INSTALLED_MANIFEST_PASS="+expected+"/tar.gz")' "$MANIFEST" "$EXPECTED_ARCHITECTURE"
 
           PYTHON_FILE="$(file -L "$ROOT/runtime/bin/python3")"
           echo "INSTALLED_PYTHON_FILE=$PYTHON_FILE"

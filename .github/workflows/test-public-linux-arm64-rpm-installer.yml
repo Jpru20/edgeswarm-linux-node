@@ -47,7 +47,7 @@ jobs:
             > /tmp/edgeswarm-rpm-test/Dockerfile
 
           docker build \
-            --tag edgeswarm-fedora-arm64-rpm-test:v0.1.9 \
+            --tag edgeswarm-fedora-arm64-rpm-test:v0.1.10 \
             /tmp/edgeswarm-rpm-test
 
       - name: Start clean Fedora systemd container
@@ -64,7 +64,7 @@ jobs:
             --tmpfs /run \
             --tmpfs /run/lock \
             --volume /sys/fs/cgroup:/sys/fs/cgroup:rw \
-            edgeswarm-fedora-arm64-rpm-test:v0.1.9
+            edgeswarm-fedora-arm64-rpm-test:v0.1.10
 
           ready=false
 
@@ -90,7 +90,7 @@ jobs:
 
       - name: Install from public universal installer
         env:
-          INSTALLER_URL: https://github.com/Jpru20/edgeswarm-linux-node/releases/download/v0.1.9/install-linux.sh
+          INSTALLER_URL: https://github.com/Jpru20/edgeswarm-linux-node/releases/download/v0.1.10/install-linux.sh
         shell: bash
         run: |
           set -euo pipefail
@@ -116,7 +116,7 @@ jobs:
               bash /tmp/install-linux.sh
             '
 
-      - name: Validate installed v0.1.9 RPM package
+      - name: Validate installed v0.1.10 RPM package
         shell: bash
         run: |
           set -euo pipefail
@@ -192,9 +192,9 @@ jobs:
             echo "RPM_MANIFEST_RUNTIME_SHA256=$manifest_runtime_sha"
             echo "RPM_MANIFEST_NEURAL_SHA256=$manifest_neural_sha"
 
-            if [[ "$manifest_version" != "0.1.9" ]]
+            if [[ "$manifest_version" != "0.1.10" ]]
             then
-              echo "ERROR: Expected manifest version 0.1.8."
+              echo "ERROR: Expected manifest version 0.1.10."
               exit 1
             fi
 
@@ -210,7 +210,7 @@ jobs:
               exit 1
             fi
 
-            if [[ "$manifest_runtime_sha" != "b5c008fa89b447880dc0b95d5aac3218afa7bbb834062fbffd95b29af4aca7e0" ]]
+            if [[ "$manifest_runtime_sha" != "a75587c72e1dd52ba4d5f83cb8429161e80c563ece8d6ec4b483b859cf4fe87c" ]]
             then
               echo "ERROR: Runtime SHA256 mismatch."
               exit 1
