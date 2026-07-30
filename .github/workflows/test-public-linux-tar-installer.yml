@@ -88,7 +88,7 @@ jobs:
           test -x "$CLI"
           echo "INSTALLED_CLI=$CLI"
 
-          python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); expected=sys.argv[2]; assert m["version"]=="0.1.8",m; assert m["architecture"]==expected,m; assert m["packageType"]=="tar.gz",m; assert m["runtimeSha256"]=="6eab4ab2660febe2758708d94f0f52a57fbb9b323568ca13a83eaa73c0694e42",m; assert m["neuralModuleSha256"]=="6c1103a2ab9bf7707511ccc4fcd83dacfbc5faf57c4a77b9b7b86b936d17d9b6",m; print("INSTALLED_MANIFEST_PASS="+expected+"/tar.gz")' "$MANIFEST" "$EXPECTED_ARCHITECTURE"
+          python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); expected=sys.argv[2]; assert m["version"]=="0.1.9",m; assert m["architecture"]==expected,m; assert m["packageType"]=="tar.gz",m; assert m["runtimeSha256"]=="b5c008fa89b447880dc0b95d5aac3218afa7bbb834062fbffd95b29af4aca7e0",m; assert m["neuralModuleSha256"]=="839d61276658b1be20102f7b3333f3ad871d68e3cbaec18b4c21eb3267c4383d",m; print("INSTALLED_MANIFEST_PASS="+expected+"/tar.gz")' "$MANIFEST" "$EXPECTED_ARCHITECTURE"
 
           PYTHON_FILE="$(file -L "$ROOT/runtime/bin/python3")"
           echo "INSTALLED_PYTHON_FILE=$PYTHON_FILE"

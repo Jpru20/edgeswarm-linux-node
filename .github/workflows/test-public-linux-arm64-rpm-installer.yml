@@ -192,7 +192,7 @@ jobs:
             echo "RPM_MANIFEST_RUNTIME_SHA256=$manifest_runtime_sha"
             echo "RPM_MANIFEST_NEURAL_SHA256=$manifest_neural_sha"
 
-            if [[ "$manifest_version" != "0.1.8" ]]
+            if [[ "$manifest_version" != "0.1.9" ]]
             then
               echo "ERROR: Expected manifest version 0.1.8."
               exit 1
@@ -210,13 +210,13 @@ jobs:
               exit 1
             fi
 
-            if [[ "$manifest_runtime_sha" != "6eab4ab2660febe2758708d94f0f52a57fbb9b323568ca13a83eaa73c0694e42" ]]
+            if [[ "$manifest_runtime_sha" != "b5c008fa89b447880dc0b95d5aac3218afa7bbb834062fbffd95b29af4aca7e0" ]]
             then
               echo "ERROR: Runtime SHA256 mismatch."
               exit 1
             fi
 
-            if [[ "$manifest_neural_sha" != "6c1103a2ab9bf7707511ccc4fcd83dacfbc5faf57c4a77b9b7b86b936d17d9b6" ]]
+            if [[ "$manifest_neural_sha" != "839d61276658b1be20102f7b3333f3ad871d68e3cbaec18b4c21eb3267c4383d" ]]
             then
               echo "ERROR: Neural SHA256 mismatch."
               exit 1
