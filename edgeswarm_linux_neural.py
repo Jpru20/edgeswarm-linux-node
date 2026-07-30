@@ -226,13 +226,30 @@ def smoke_marker_path(model_id: str) -> Path:
 
 def model_smoke_passed(model_id: str) -> bool:
     marker = smoke_marker_path(model_id)
-    if not marker.exists():
+    model_path = find_local_model_file(model_id)
+
+    if not marker.exists() or not model_path:
         return False
 
     try:
         data = json.loads(marker.read_text())
-        model_path = data.get("modelPath")
-        return bool(data.get("smokePassed") is True and model_path and Path(model_path).exists())
+        recorded_path = data.get("modelPath")
+        recorded_hash = str(
+            data.get("modelSha256Prefix") or ""
+        ).strip().lower()
+        current_hash = _sha256_file(
+            model_path,
+            max_bytes=16 * 1024 * 1024,
+        )
+
+        return bool(
+            data.get("smokePassed") is True
+            and recorded_path
+            and Path(recorded_path).resolve() == model_path.resolve()
+            and recorded_hash
+            and current_hash
+            and recorded_hash == current_hash.lower()
+        )
     except Exception:
         return False
 
@@ -241,8 +258,41 @@ def get_installed_model_ids() -> List[str]:
     return [model_id for model_id in MODEL_REGISTRY if find_local_model_file(model_id)]
 
 
+def _model_strength_key(model_id: str) -> Tuple[int, int, int, int, str]:
+    spec = MODEL_REGISTRY.get(model_id) or {}
+    capability = str(spec.get("capability") or "")
+    match = re.search(r"(\d+)B", capability, re.IGNORECASE)
+    parameter_billions = int(match.group(1)) if match else 0
+
+    try:
+        tier = int(spec.get("tier") or 0)
+    except Exception:
+        tier = 0
+
+    coder_preference = 1 if "coder" in model_id.lower() else 0
+    stable_preference = 0 if spec.get("experimental") is True else 1
+
+    return (
+        tier,
+        parameter_billions,
+        coder_preference,
+        stable_preference,
+        model_id,
+    )
+
+
 def get_ready_model_ids() -> List[str]:
-    return [model_id for model_id in get_installed_model_ids() if model_smoke_passed(model_id)]
+    ready = [
+        model_id
+        for model_id in get_installed_model_ids()
+        if model_smoke_passed(model_id)
+    ]
+
+    return sorted(
+        ready,
+        key=_model_strength_key,
+        reverse=True,
+    )
 
 
 def get_linux_neural_capabilities() -> List[str]:
@@ -323,7 +373,11 @@ def build_linux_neural_readiness() -> Dict[str, Any]:
 
 def select_model_for_required_model(required_model: str) -> Optional[str]:
     required = required_model or "Neural-Inference"
-    candidates = CAPABILITY_TO_MODEL_PRIORITY.get(required)
+
+    if required == "Neural-Inference":
+        candidates = get_ready_model_ids()
+    else:
+        candidates = CAPABILITY_TO_MODEL_PRIORITY.get(required)
 
     if not candidates:
         if required.startswith("Neural-Inference-3B"):
@@ -335,7 +389,7 @@ def select_model_for_required_model(required_model: str) -> Optional[str]:
         elif required.startswith("Neural-Inference-14B"):
             candidates = ["qwen2.5:14b"]
         elif required.startswith("Neural-Inference"):
-            candidates = CAPABILITY_TO_MODEL_PRIORITY["Neural-Inference"]
+            candidates = get_ready_model_ids()
         else:
             return None
 

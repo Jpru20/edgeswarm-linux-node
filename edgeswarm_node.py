@@ -61,7 +61,7 @@ except Exception:
     encode_defunct = None
 
 
-APP_VERSION = "0.1.8"
+APP_VERSION = "0.1.9"
 # EDGE_SWARM_LINUX_AUTH_HEADERS_COMPAT_V1
 
 def build_auth_headers() -> dict:
@@ -1145,6 +1145,8 @@ def send_heartbeat(
                 payload["runtimeAcceleration"] = neural_readiness.get("runtimeAcceleration") or "cpu"
                 payload["eligibleModelCapabilities"] = neural_capabilities
                 payload["modelsAvailable"] = ready_models
+                payload["primaryModelId"] = selected_model_id
+                payload["fallbackModels"] = ready_models[1:]
                 payload["missingRequiredModels"] = [
                     model_id
                     for model_id, info in model_status.items()
@@ -1973,7 +1975,10 @@ def _edgeswarm_load_or_create_linux_wallet_v1(provider_email: str) -> Tuple[str,
         except Exception as exc:
             raise SystemExit(f"Invalid Linux node private key: {exc}")
     elif _edgeswarm_is_wallet_address_v1(wallet_address):
-        log(f"[WALLET] Loaded Linux node wallet address: {wallet_address[:10]}...")
+        raise SystemExit(
+            "Existing Linux wallet address found, but its private key is missing. "
+            "Run sudo edgeswarm login to securely recover the wallet before starting the node."
+        )
     else:
         if not Account:
             raise SystemExit("eth_account is required to create a Linux node wallet.")

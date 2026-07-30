@@ -7,6 +7,8 @@ import sys
 import time
 from pathlib import Path
 
+from eth_account import Account
+
 AUTH_PATH = Path("/etc/edgeswarm-node-auth.json")
 STATUS_DIR = Path("/var/lib/edgeswarm-node")
 STATUS_PATH = STATUS_DIR / "ui_status.json"
@@ -15,6 +17,44 @@ STATUS_PATH = STATUS_DIR / "ui_status.json"
 def fail(message: str, code: int = 1):
     print(message, file=sys.stderr)
     raise SystemExit(code)
+
+
+def validate_wallet_identity(
+    private_key: str,
+    wallet_address: str = "",
+    expected_wallet: str = "",
+):
+    private_key = str(private_key or "").strip()
+    wallet_address = str(wallet_address or "").strip()
+    expected_wallet = str(expected_wallet or "").strip()
+
+    if not private_key:
+        fail("Invalid auth session: recovered wallet private key missing.")
+
+    try:
+        account = Account.from_key(private_key)
+    except Exception as exc:
+        fail(
+            "Invalid auth session: recovered wallet private key "
+            f"is invalid: {exc}"
+        )
+
+    derived_wallet = account.address
+
+    if wallet_address and wallet_address.lower() != derived_wallet.lower():
+        fail(
+            "Invalid auth session: wallet address does not match "
+            "the recovered private key."
+        )
+
+    if expected_wallet and expected_wallet.lower() != derived_wallet.lower():
+        fail(
+            "Wallet recovery mismatch: recovered wallet does not "
+            "match the existing provider wallet."
+        )
+
+    return derived_wallet, account.key.hex()
+
 
 
 def main():
@@ -31,6 +71,16 @@ def main():
     with src.open("r") as f:
         data = json.load(f)
 
+    existing_auth = {}
+
+    if AUTH_PATH.exists():
+        try:
+            existing_auth = json.loads(
+                AUTH_PATH.read_text(encoding="utf-8")
+            )
+        except Exception:
+            existing_auth = {}
+
     provider = str(data.get("providerEmail") or "").strip().lower()
     access = str(data.get("accessToken") or "").strip()
     refresh = str(data.get("refreshToken") or "").strip()
@@ -43,6 +93,63 @@ def main():
 
     if not refresh:
         fail("Invalid auth session: refreshToken missing.")
+
+    existing_provider = str(
+        existing_auth.get("providerEmail") or ""
+    ).strip().lower()
+
+    existing_wallet = str(
+        existing_auth.get("walletAddress")
+        or existing_auth.get("wallet_address")
+        or existing_auth.get("worker")
+        or ""
+    ).strip()
+
+    if existing_provider == provider:
+        wallet_fields = (
+            "walletAddress",
+            "wallet_address",
+            "worker",
+            "nodeWalletPrivateKey",
+            "walletPrivateKey",
+            "privateKey",
+            "nodeWalletCreatedAt",
+            "walletRecoveredAt",
+        )
+
+        for key in wallet_fields:
+            if not data.get(key) and existing_auth.get(key):
+                data[key] = existing_auth[key]
+
+    wallet_address = str(
+        data.get("walletAddress")
+        or data.get("wallet_address")
+        or data.get("worker")
+        or ""
+    ).strip()
+
+    private_key = str(
+        data.get("nodeWalletPrivateKey")
+        or data.get("walletPrivateKey")
+        or data.get("privateKey")
+        or ""
+    ).strip()
+
+    expected_wallet = (
+        existing_wallet
+        if existing_provider == provider
+        else ""
+    )
+
+    wallet_address, private_key = validate_wallet_identity(
+        private_key,
+        wallet_address,
+        expected_wallet,
+    )
+
+    data["walletAddress"] = wallet_address
+    data["worker"] = wallet_address
+    data["nodeWalletPrivateKey"] = private_key
 
     data["authFileVersion"] = "edgeswarm_linux_auth_v1"
     data["providerEmail"] = provider

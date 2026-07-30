@@ -45,6 +45,8 @@ bash /usr/lib/edgeswarm-node-package/install.sh
 if [ "$1" -eq 0 ]; then
   systemctl disable --now edgeswarm-node.service 2>/dev/null || true
   systemctl disable --now edgeswarm-node-updater.timer 2>/dev/null || true
+  systemctl disable --now edgeswarm-node-model-provisioner.timer 2>/dev/null || true
+  systemctl stop edgeswarm-node-model-provisioner.service 2>/dev/null || true
 fi
 
 %postun
@@ -52,6 +54,8 @@ if [ "$1" -eq 0 ]; then
   rm -f /etc/systemd/system/edgeswarm-node.service
   rm -f /etc/systemd/system/edgeswarm-node-updater.service
   rm -f /etc/systemd/system/edgeswarm-node-updater.timer
+  rm -f /etc/systemd/system/edgeswarm-node-model-provisioner.service
+  rm -f /etc/systemd/system/edgeswarm-node-model-provisioner.timer
   rm -f /usr/local/bin/edgeswarm
   rm -f /usr/share/applications/edgeswarm-node.desktop
   rm -rf /opt/edgeswarm-node

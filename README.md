@@ -1,4 +1,4 @@
-# EdgeSwarm Linux Node v0.1.8 Public Beta
+# EdgeSwarm Linux Node v0.1.9 Public Beta
 
 Headless Linux node for EdgeSwarm deterministic and local neural execution.
 

@@ -10,6 +10,13 @@ from pathlib import Path
 
 from supabase import create_client
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+INSTALL_ROOT = SCRIPT_DIR.parent
+if str(INSTALL_ROOT) not in sys.path:
+    sys.path.insert(0, str(INSTALL_ROOT))
+
+from edgeswarm_wallet_vault import recover_wallet_identity
+
 DEFAULT_AUTH_FILE = "/etc/edgeswarm-node-auth.json"
 STATUS_DIR = Path("/var/lib/edgeswarm-node")
 STATUS_PATH = STATUS_DIR / "ui_status.json"
@@ -124,13 +131,54 @@ def main():
         print("2FA succeeded but session tokens were missing.", file=sys.stderr)
         raise SystemExit(1)
 
+    existing_wallet = ""
+
+    if auth_file.exists():
+        try:
+            existing_auth = json.loads(
+                auth_file.read_text(encoding="utf-8")
+            )
+        except Exception:
+            existing_auth = {}
+
+        existing_provider = str(
+            existing_auth.get("providerEmail") or ""
+        ).strip().lower()
+
+        if existing_provider == email:
+            existing_wallet = str(
+                existing_auth.get("walletAddress")
+                or existing_auth.get("wallet_address")
+                or existing_auth.get("worker")
+                or ""
+            ).strip()
+
+    try:
+        wallet_identity = recover_wallet_identity(
+            supabase,
+            email,
+            access_token,
+            password,
+            existing_wallet,
+        )
+    except Exception as exc:
+        print(
+            f"Wallet recovery failed: {exc}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
     data = {
         "authFileVersion": "edgeswarm_linux_auth_v1",
         "providerEmail": email,
         "accessToken": access_token,
         "refreshToken": refresh_token,
         "expiresAt": expires_at,
-        "mfaVerified": True
+        "mfaVerified": True,
+        "walletAddress": wallet_identity["walletAddress"],
+        "worker": wallet_identity["walletAddress"],
+        "nodeWalletPrivateKey": wallet_identity["privateKey"],
+        "walletRecoveredAt": int(time.time())
     }
 
     if os.geteuid() != 0:

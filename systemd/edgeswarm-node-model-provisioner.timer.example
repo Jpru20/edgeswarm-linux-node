@@ -1,0 +1,12 @@
+[Unit]
+Description=Check for EdgeSwarm Recommended Linux Models
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=6h
+RandomizedDelaySec=30min
+Persistent=true
+Unit=edgeswarm-node-model-provisioner.service
+
+[Install]
+WantedBy=timers.target

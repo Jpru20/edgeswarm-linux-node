@@ -11,6 +11,7 @@ INSTALL_DIR="${EDGESWARM_INSTALL_DIR:-/opt/edgeswarm-node}"
 ENV_FILE="${EDGESWARM_ENV_FILE:-/etc/edgeswarm-node.env}"
 SERVICE_NAME="edgeswarm-node"
 UPDATER_NAME="edgeswarm-node-updater"
+MODEL_PROVISIONER_NAME="edgeswarm-node-model-provisioner"
 SERVICE_USER="${EDGESWARM_SERVICE_USER:-edgeswarm}"
 SOURCE_PYTHON="$SRC_DIR/runtime/bin/edgeswarm-python"
 
@@ -72,6 +73,11 @@ refresh_token = (
     auth.get("refreshToken")
     or auth.get("refresh_token")
 )
+private_key = (
+    auth.get("nodeWalletPrivateKey")
+    or auth.get("walletPrivateKey")
+    or auth.get("privateKey")
+)
 provider = (
     auth.get("providerEmail")
     or auth.get("provider_email")
@@ -80,7 +86,7 @@ provider = (
 
 raise SystemExit(
     0
-    if access_token and refresh_token and provider
+    if access_token and refresh_token and provider and private_key
     else 1
 )
 PY_EXISTING_AUTH
@@ -89,7 +95,7 @@ PY_EXISTING_AUTH
   fi
 fi
 
-START_NODE_AFTER_INSTALL="$AUTO_UPDATE"
+START_NODE_AFTER_INSTALL="0"
 
 if [[ "$EXISTING_AUTH_PRESENT" == "1" ]]; then
   START_NODE_AFTER_INSTALL="1"
@@ -259,6 +265,14 @@ if [[ -f "$INSTALL_DIR/systemd/edgeswarm-node-updater.timer.example" ]]; then
   cp "$INSTALL_DIR/systemd/edgeswarm-node-updater.timer.example" "/etc/systemd/system/${UPDATER_NAME}.timer"
 fi
 
+if [[ -f "$INSTALL_DIR/systemd/edgeswarm-node-model-provisioner.service.example" ]]; then
+  cp "$INSTALL_DIR/systemd/edgeswarm-node-model-provisioner.service.example" "/etc/systemd/system/${MODEL_PROVISIONER_NAME}.service"
+fi
+
+if [[ -f "$INSTALL_DIR/systemd/edgeswarm-node-model-provisioner.timer.example" ]]; then
+  cp "$INSTALL_DIR/systemd/edgeswarm-node-model-provisioner.timer.example" "/etc/systemd/system/${MODEL_PROVISIONER_NAME}.timer"
+fi
+
 chown -R root:root "$INSTALL_DIR"
 chmod -R go-w "$INSTALL_DIR"
 
@@ -286,10 +300,15 @@ fi
 if systemd_is_running; then
   systemctl daemon-reload
 
+  if [[ -f "/etc/systemd/system/${MODEL_PROVISIONER_NAME}.timer" ]]; then
+    echo "[EdgeSwarm] Enabling automatic recommended-model provisioning."
+    systemctl enable --now "${MODEL_PROVISIONER_NAME}.timer"
+  fi
+
   if [[ "$START_NODE_AFTER_INSTALL" == "1" ]]; then
     systemctl enable "${SERVICE_NAME}.service"
   else
-    echo "[EdgeSwarm] Node service remains disabled until authentication succeeds."
+    echo "[EdgeSwarm] Node service remains disabled until authentication and wallet recovery succeed."
     systemctl disable --now "${SERVICE_NAME}.service" 2>/dev/null || true
   fi
 
@@ -307,7 +326,7 @@ if systemd_is_running; then
     systemctl restart "${SERVICE_NAME}.service" || true
   else
     echo "[EdgeSwarm] Node service installed but not started yet."
-    echo "[EdgeSwarm] Authenticate with email/password/2FA first, then start the node."
+    echo "[EdgeSwarm] Run sudo edgeswarm login to authenticate and recover the existing wallet."
     systemctl stop "${SERVICE_NAME}.service" || true
 
     if [[       -f "/etc/systemd/system/${UPDATER_NAME}.timer"       && "$PACKAGED_PUBLIC_RELEASE_SAFE" == "true"     ]]; then

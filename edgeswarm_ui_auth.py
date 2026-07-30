@@ -6,10 +6,13 @@ import time
 from pathlib import Path
 
 import requests
+from supabase import create_client
 
 from edgeswarm_ui_common import load_env_file, pkexec
+from edgeswarm_wallet_vault import recover_wallet_identity
 
 AUTH_INSTALLER = Path("/opt/edgeswarm-node/scripts/edgeswarm_linux_install_auth.py")
+BUNDLED_PYTHON = Path("/opt/edgeswarm-node/runtime/bin/edgeswarm-python")
 
 
 class EdgeSwarmAuthError(Exception):
@@ -199,6 +202,19 @@ def login_with_password_and_2fa(email: str, password: str, code: str) -> dict:
     final_refresh = verified.get("refresh_token") or refresh_token
     final_expires_in = int(verified.get("expires_in") or expires_in or 3600)
 
+    try:
+        supabase_url, supabase_key = _supabase_config()
+        wallet_identity = recover_wallet_identity(
+            create_client(supabase_url, supabase_key),
+            email,
+            final_access,
+            password,
+        )
+    except Exception as exc:
+        raise EdgeSwarmAuthError(
+            f"Wallet recovery failed: {exc}"
+        ) from exc
+
     return {
         "authFileVersion": "edgeswarm_linux_auth_v1",
         "providerEmail": email,
@@ -206,10 +222,19 @@ def login_with_password_and_2fa(email: str, password: str, code: str) -> dict:
         "refreshToken": final_refresh,
         "expiresAt": int(time.time()) + final_expires_in,
         "mfaVerified": True,
+        "walletAddress": wallet_identity["walletAddress"],
+        "worker": wallet_identity["walletAddress"],
+        "nodeWalletPrivateKey": wallet_identity["privateKey"],
+        "walletRecoveredAt": int(time.time()),
     }
 
 
 def install_auth_session(auth_session: dict) -> dict:
+    if not BUNDLED_PYTHON.is_file():
+        raise EdgeSwarmAuthError(
+            f"Bundled Python runtime missing: {BUNDLED_PYTHON}"
+        )
+
     if not AUTH_INSTALLER.exists():
         raise EdgeSwarmAuthError(f"Auth installer missing: {AUTH_INSTALLER}")
 
@@ -227,7 +252,7 @@ def install_auth_session(auth_session: dict) -> dict:
 
         os.chmod(temp_path, 0o600)
 
-        code, out, err = pkexec([str(AUTH_INSTALLER), temp_path], timeout=90)
+        code, out, err = pkexec([str(BUNDLED_PYTHON), str(AUTH_INSTALLER), temp_path], timeout=90)
 
         if code != 0:
             raise EdgeSwarmAuthError(err or out or "Auth installer failed.")

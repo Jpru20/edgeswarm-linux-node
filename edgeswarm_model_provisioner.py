@@ -12,6 +12,8 @@ from pathlib import Path
 
 import requests
 
+from edgeswarm_linux_neural import model_smoke_passed
+
 API_BASE = os.getenv("GCP_BASE_URL", "https://api.edgeswarm.io").rstrip("/")
 MODEL_DIR = Path(
     os.getenv(
@@ -19,6 +21,9 @@ MODEL_DIR = Path(
         "/var/lib/edgeswarm-node/models",
     )
 ).expanduser()
+VERIFICATION_CACHE_PATH = (
+    MODEL_DIR / ".edgeswarm_model_verification_cache.json"
+)
 
 
 def _float_or_none(value):
@@ -217,41 +222,151 @@ def sha256_file(path):
     return digest.hexdigest().lower()
 
 
+def _load_verification_cache():
+    try:
+        data = json.loads(
+            VERIFICATION_CACHE_PATH.read_text(encoding="utf-8")
+        )
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_verification_cache(cache):
+    try:
+        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        temp_path = VERIFICATION_CACHE_PATH.with_name(
+            VERIFICATION_CACHE_PATH.name + ".tmp"
+        )
+        temp_path.write_text(
+            json.dumps(cache, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temp_path, VERIFICATION_CACHE_PATH)
+    except Exception:
+        pass
+
+
+def _forget_cached_verification(path):
+    cache = _load_verification_cache()
+    key = str(Path(path).resolve())
+
+    if key in cache:
+        del cache[key]
+        _save_verification_cache(cache)
+
+
+def _cached_verification(path, expected_sha256):
+    path = Path(path)
+    expected = str(expected_sha256 or "").strip().lower()
+
+    if not expected:
+        return None
+
+    try:
+        stat = path.stat()
+    except Exception:
+        return None
+
+    entry = _load_verification_cache().get(
+        str(path.resolve())
+    )
+
+    if not isinstance(entry, dict):
+        return None
+
+    if not (
+        entry.get("expectedSha256") == expected
+        and entry.get("actualSha256") == expected
+        and entry.get("sizeBytes") == stat.st_size
+        and entry.get("mtimeNs") == stat.st_mtime_ns
+        and entry.get("device") == stat.st_dev
+        and entry.get("inode") == stat.st_ino
+    ):
+        return None
+
+    return {
+        "ok": True,
+        "path": str(path),
+        "actualSha256": expected,
+        "expectedSha256": expected,
+        "sizeBytes": stat.st_size,
+        "cached": True,
+    }
+
+
+def _remember_verified_file(path, expected_sha256, actual_sha256):
+    path = Path(path)
+    expected = str(expected_sha256 or "").strip().lower()
+    actual = str(actual_sha256 or "").strip().lower()
+
+    if not expected or expected != actual:
+        return
+
+    try:
+        stat = path.stat()
+    except Exception:
+        return
+
+    cache = _load_verification_cache()
+    cache[str(path.resolve())] = {
+        "expectedSha256": expected,
+        "actualSha256": actual,
+        "sizeBytes": stat.st_size,
+        "mtimeNs": stat.st_mtime_ns,
+        "device": stat.st_dev,
+        "inode": stat.st_ino,
+    }
+    _save_verification_cache(cache)
+
+
 def verify_file(path, expected_sha256):
     path = Path(path)
+    expected = str(expected_sha256 or "").strip().lower()
 
     if not path.exists():
+        _forget_cached_verification(path)
         return {
             "ok": False,
             "path": str(path),
             "reason": "missing",
         }
 
+    cached = _cached_verification(path, expected)
+
+    if cached is not None:
+        return cached
+
     actual = sha256_file(path)
-    expected = str(expected_sha256 or "").strip().lower()
+    stat = path.stat()
 
     if expected and actual != expected:
+        _forget_cached_verification(path)
         return {
             "ok": False,
             "path": str(path),
             "reason": "sha256_mismatch",
             "expectedSha256": expected,
             "actualSha256": actual,
-            "sizeBytes": path.stat().st_size,
+            "sizeBytes": stat.st_size,
         }
+
+    _remember_verified_file(path, expected, actual)
 
     return {
         "ok": True,
         "path": str(path),
         "actualSha256": actual,
         "expectedSha256": expected or None,
-        "sizeBytes": path.stat().st_size,
+        "sizeBytes": stat.st_size,
+        "cached": False,
     }
 
 
-def verify_recommended():
-    data = fetch_recommendation()
-    recommendation = data["recommendation"]
+def verify_recommended(recommendation_data=None):
+    if recommendation_data is None:
+        recommendation_data = fetch_recommendation()["recommendation"]
+    recommendation = recommendation_data
     model = recommendation.get("recommendedModel") or {}
     selection = select_recommended_artifact(model)
     files = selection.get("files") or []
@@ -368,9 +483,10 @@ def download_file(url, final_path, expected_sha256=None):
     raise RuntimeError(f"download_failed:{final_path.name}:{last_error}")
 
 
-def download_recommended():
-    data = fetch_recommendation()
-    recommendation = data["recommendation"]
+def download_recommended(recommendation_data=None):
+    if recommendation_data is None:
+        recommendation_data = fetch_recommendation()["recommendation"]
+    recommendation = recommendation_data
     model = recommendation.get("recommendedModel") or {}
     selection = select_recommended_artifact(model)
     files = selection.get("files") or []
@@ -438,13 +554,13 @@ def smoke_model(model_id):
     return _extract_json_from_output(output)
 
 
-def smoke_recommended():
-    data = fetch_recommendation()
-    model = (
-        (data.get("recommendation") or {})
-        .get("recommendedModel")
-        or {}
-    )
+def smoke_recommended(recommendation_data=None):
+    if recommendation_data is None:
+        recommendation_data = (
+            fetch_recommendation().get("recommendation")
+            or {}
+        )
+    model = recommendation_data.get("recommendedModel") or {}
     selection = select_recommended_artifact(model)
     model_id = selection.get("modelId")
 
@@ -452,7 +568,7 @@ def smoke_recommended():
         return {
             "ok": False,
             "error": "no_recommended_model_id",
-            "recommendation": data,
+            "recommendation": recommendation_data,
         }
 
     result = smoke_model(model_id)
@@ -470,17 +586,68 @@ def smoke_recommended():
 
 def full_setup():
     recommendation = fetch_recommendation()
-    download = download_recommended()
-    smoke = smoke_recommended()
-    verify = verify_recommended()
+    recommendation_data = recommendation.get("recommendation") or {}
+    recommended_model = recommendation_data.get("recommendedModel") or {}
+    selection = select_recommended_artifact(recommended_model)
+    model_id = selection.get("modelId")
+    should_download = bool(recommendation_data.get("shouldDownload"))
+
+    if not should_download:
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "backend_download_not_requested",
+            "shouldDownload": False,
+            "modelId": model_id,
+            "recommendation": recommendation,
+        }
+
+    verify_before = verify_recommended(recommendation_data)
+
+    if verify_before.get("ok"):
+        download = {
+            "ok": True,
+            "skipped": True,
+            "reason": "already_verified",
+            "modelId": model_id,
+            "files": verify_before.get("files") or [],
+        }
+    else:
+        download = download_recommended(recommendation_data)
+
+    verify = verify_recommended(recommendation_data)
+
+    if not verify.get("ok"):
+        smoke = {
+            "ok": False,
+            "skipped": True,
+            "reason": "artifact_not_verified",
+        }
+    elif model_id and model_smoke_passed(model_id):
+        smoke = {
+            "ok": True,
+            "skipped": True,
+            "reason": "already_smoke_verified",
+            "modelId": model_id,
+        }
+    else:
+        smoke = smoke_recommended(recommendation_data)
 
     return {
-        "ok": bool(download.get("ok")) and bool(smoke.get("ok")) and bool(verify.get("ok")),
+        "ok": (
+            bool(download.get("ok"))
+            and bool(verify.get("ok"))
+            and bool(smoke.get("ok"))
+        ),
+        "shouldDownload": True,
+        "modelId": model_id,
         "recommendation": recommendation,
+        "verifyBefore": verify_before,
         "download": download,
-        "smoke": smoke,
         "verify": verify,
+        "smoke": smoke,
     }
+
 
 
 def main():

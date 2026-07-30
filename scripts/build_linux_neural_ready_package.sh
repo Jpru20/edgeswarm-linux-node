@@ -5,7 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALLED_ROOT="${EDGESWARM_INSTALLED_ROOT:-/opt/edgeswarm-node}"
 STANDALONE_RUNTIME="${EDGESWARM_STANDALONE_RUNTIME:-}"
 
-if [[ -x "$ROOT/runtime/bin/edgeswarm-python" ]]; then
+if [[ -n "$STANDALONE_RUNTIME" && -x "$STANDALONE_RUNTIME/bin/edgeswarm-python" ]]; then
+  PYTHON="$STANDALONE_RUNTIME/bin/edgeswarm-python"
+elif [[ -x "$ROOT/runtime/bin/edgeswarm-python" ]]; then
   PYTHON="$ROOT/runtime/bin/edgeswarm-python"
 elif [[ -x "$INSTALLED_ROOT/.venv/bin/python" ]]; then
   PYTHON="$INSTALLED_ROOT/.venv/bin/python"
@@ -320,6 +322,8 @@ set -e
 
 systemctl stop edgeswarm-node.service 2>/dev/null || true
 systemctl stop edgeswarm-node-updater.timer 2>/dev/null || true
+systemctl stop edgeswarm-node-model-provisioner.timer 2>/dev/null || true
+systemctl stop edgeswarm-node-model-provisioner.service 2>/dev/null || true
 
 exit 0
 EOF
@@ -332,7 +336,13 @@ case "${1:-}" in
   remove|purge)
     systemctl disable edgeswarm-node.service 2>/dev/null || true
     systemctl disable edgeswarm-node-updater.timer 2>/dev/null || true
+    systemctl disable edgeswarm-node-model-provisioner.timer 2>/dev/null || true
 
+    rm -f /etc/systemd/system/edgeswarm-node.service
+    rm -f /etc/systemd/system/edgeswarm-node-updater.service
+    rm -f /etc/systemd/system/edgeswarm-node-updater.timer
+    rm -f /etc/systemd/system/edgeswarm-node-model-provisioner.service
+    rm -f /etc/systemd/system/edgeswarm-node-model-provisioner.timer
     rm -f /usr/local/bin/edgeswarm
     rm -f /usr/share/applications/edgeswarm-node.desktop
     rm -rf /opt/edgeswarm-node
