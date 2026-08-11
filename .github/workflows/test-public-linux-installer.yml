@@ -49,8 +49,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          curl --fail --location --retry 4 --retry-delay 2 --output /tmp/edgeswarm-v011.deb ""
-          echo "  /tmp/edgeswarm-v011.deb" | sha256sum -c -
+          curl --fail --location --retry 4 --retry-delay 2 --output /tmp/edgeswarm-v011.deb "$DEB_URL"
+          echo "$DEB_SHA256  /tmp/edgeswarm-v011.deb" | sha256sum -c -
           sudo apt-get install -y /tmp/edgeswarm-v011.deb
 
       - name: Validate installed v0.1.11 package
