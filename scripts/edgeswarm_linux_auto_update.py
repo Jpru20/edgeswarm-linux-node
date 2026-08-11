@@ -239,6 +239,183 @@ def run(cmd, cwd=None, extra_env=None):
     subprocess.run(cmd, cwd=cwd, check=True, env=env)
 
 
+ROLLBACK_INTEGRATION_PATHS = (
+    "/etc/edgeswarm-node.env",
+    "/usr/lib/edgeswarm-node-package",
+    "/etc/systemd/system/edgeswarm-node.service",
+    "/etc/systemd/system/edgeswarm-node-updater.service",
+    "/etc/systemd/system/edgeswarm-node-updater.timer",
+    "/etc/systemd/system/edgeswarm-node-model-provisioner.service",
+    "/etc/systemd/system/edgeswarm-node-model-provisioner.timer",
+    "/usr/local/bin/edgeswarm",
+    "/usr/share/applications/edgeswarm-node.desktop",
+)
+
+
+def _systemctl_state_v1(action, unit):
+    try:
+        return subprocess.run(
+            ["systemctl", action, unit],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode == 0
+    except Exception:
+        return False
+
+
+def create_update_rollback_snapshot_v1(install_dir):
+    root = Path(tempfile.mkdtemp(prefix="edgeswarm-rollback-"))
+    install = Path(install_dir)
+    backup_install = root / "install"
+
+    if install.is_dir():
+        shutil.copytree(install, backup_install, symlinks=True)
+
+    files_root = root / "files"
+    for value in ROLLBACK_INTEGRATION_PATHS:
+        src = Path(value)
+        if not src.exists() and not src.is_symlink():
+            continue
+        dst = files_root / value.lstrip("/")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if src.is_symlink():
+            dst.symlink_to(os.readlink(src))
+        elif src.is_dir():
+            shutil.copytree(src, dst, symlinks=True)
+        elif src.is_file():
+            shutil.copy2(src, dst)
+
+    return {
+        "armed": True,
+        "root": str(root),
+        "installDir": str(install),
+        "serviceActive": _systemctl_state_v1("is-active", "edgeswarm-node.service"),
+        "serviceEnabled": _systemctl_state_v1("is-enabled", "edgeswarm-node.service"),
+    }
+
+
+def restore_update_rollback_snapshot_v1(state):
+    if not isinstance(state, dict) or not state.get("armed"):
+        return
+
+    state["armed"] = False
+    root = Path(state["root"])
+    install = Path(state["installDir"])
+    backup_install = root / "install"
+
+    subprocess.run(["systemctl", "stop", "edgeswarm-node.service"], check=False)
+
+    if install.exists():
+        shutil.rmtree(install)
+    if backup_install.is_dir():
+        shutil.copytree(backup_install, install, symlinks=True)
+
+    files_root = root / "files"
+    for value in ROLLBACK_INTEGRATION_PATHS:
+        dst = Path(value)
+        backup = files_root / value.lstrip("/")
+        if dst.exists() or dst.is_symlink():
+            if dst.is_dir() and not dst.is_symlink():
+                shutil.rmtree(dst)
+            else:
+                dst.unlink()
+        if backup.is_symlink():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.symlink_to(os.readlink(backup))
+        elif backup.is_dir():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(backup, dst, symlinks=True)
+        elif backup.is_file():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(backup, dst)
+
+    subprocess.run(["systemctl", "daemon-reload"], check=False)
+    if state.get("serviceEnabled"):
+        subprocess.run(["systemctl", "enable", "edgeswarm-node.service"], check=False)
+    else:
+        subprocess.run(["systemctl", "disable", "edgeswarm-node.service"], check=False)
+    if state.get("serviceActive"):
+        subprocess.run(["systemctl", "restart", "edgeswarm-node.service"], check=False)
+    else:
+        subprocess.run(["systemctl", "stop", "edgeswarm-node.service"], check=False)
+
+    print("[edgeswarm-updater] previous runnable application restored")
+
+
+def discard_update_rollback_snapshot_v1(state):
+    if not isinstance(state, dict):
+        return
+    state["armed"] = False
+    root_value = str(state.get("root") or "").strip()
+    if not root_value:
+        return
+    root = Path(root_value).resolve()
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    if root.parent != temp_root or not root.name.startswith("edgeswarm-rollback-"):
+        raise RuntimeError("unsafe_rollback_snapshot_path")
+    if root.is_dir():
+        shutil.rmtree(root)
+
+_ACTIVE_UPDATE_ROLLBACK_STATE_V1 = None
+
+
+def arm_update_rollback_v1(install_dir):
+    global _ACTIVE_UPDATE_ROLLBACK_STATE_V1
+    if _ACTIVE_UPDATE_ROLLBACK_STATE_V1 is not None:
+        raise RuntimeError("update_rollback_already_armed")
+    _ACTIVE_UPDATE_ROLLBACK_STATE_V1 = create_update_rollback_snapshot_v1(install_dir)
+    print("[edgeswarm-updater] rollback snapshot armed")
+
+
+def validate_post_update_service_v1():
+    state = _ACTIVE_UPDATE_ROLLBACK_STATE_V1
+    if not isinstance(state, dict) or not state.get("armed"):
+        raise RuntimeError("update_rollback_not_armed")
+
+    unit = Path("/etc/systemd/system/edgeswarm-node.service")
+    if not unit.is_file():
+        raise RuntimeError("Post-install service unit is missing.")
+
+    if state.get("serviceActive"):
+        if not _systemctl_state_v1("is-active", "edgeswarm-node.service"):
+            raise RuntimeError("Post-install node service is not active.")
+
+
+def commit_update_rollback_v1():
+    global _ACTIVE_UPDATE_ROLLBACK_STATE_V1
+    state = _ACTIVE_UPDATE_ROLLBACK_STATE_V1
+    if state is None:
+        return
+    discard_update_rollback_snapshot_v1(state)
+    _ACTIVE_UPDATE_ROLLBACK_STATE_V1 = None
+    print("[edgeswarm-updater] rollback snapshot committed")
+
+
+def rollback_active_update_v1():
+    global _ACTIVE_UPDATE_ROLLBACK_STATE_V1
+    state = _ACTIVE_UPDATE_ROLLBACK_STATE_V1
+    if not isinstance(state, dict) or not state.get("armed"):
+        return False
+
+    try:
+        restore_update_rollback_snapshot_v1(state)
+        discard_update_rollback_snapshot_v1(state)
+        _ACTIVE_UPDATE_ROLLBACK_STATE_V1 = None
+        print("[edgeswarm-updater] automatic rollback completed", file=sys.stderr)
+        return True
+    except Exception as rollback_exc:
+        print(
+            f"[edgeswarm-updater] ROLLBACK ERROR: {rollback_exc}",
+            file=sys.stderr,
+        )
+        print(
+            f"[edgeswarm-updater] rollback snapshot retained at: {state.get('root')}",
+            file=sys.stderr,
+        )
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--check-only", action="store_true")
@@ -377,6 +554,8 @@ def main():
     if args.check_only:
         print("[edgeswarm-updater] check-only mode; update available but not installing")
         return 0
+
+    arm_update_rollback_v1(args.install_dir)
 
     with tempfile.TemporaryDirectory(prefix="edgeswarm-update-") as tmp:
         tmp_dir = Path(tmp)
@@ -581,6 +760,9 @@ def main():
             "available update. Update loop blocked."
         )
 
+    validate_post_update_service_v1()
+    commit_update_rollback_v1()
+
     print(json.dumps({
         "postInstallVersion":
             installed_version,
@@ -609,4 +791,5 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except Exception as exc:
         print(f"[edgeswarm-updater] ERROR: {exc}", file=sys.stderr)
+        rollback_active_update_v1()
         raise SystemExit(1)

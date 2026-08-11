@@ -18,6 +18,7 @@ if str(INSTALL_ROOT) not in sys.path:
 from edgeswarm_wallet_vault import recover_wallet_identity
 
 DEFAULT_AUTH_FILE = "/etc/edgeswarm-node-auth.json"
+DEFAULT_WALLET_KEY_FILE = "/etc/edgeswarm-node-wallet.key"
 STATUS_DIR = Path("/var/lib/edgeswarm-node")
 STATUS_PATH = STATUS_DIR / "ui_status.json"
 
@@ -168,8 +169,16 @@ def main():
         )
         raise SystemExit(1)
 
+    wallet_key_file = Path(os.getenv("EDGESWARM_WALLET_KEY_FILE", DEFAULT_WALLET_KEY_FILE))
+    wallet_key_file.parent.mkdir(parents=True, exist_ok=True)
+    temp_wallet_key = Path(str(wallet_key_file) + ".tmp")
+    temp_wallet_key.write_text(str(wallet_identity["privateKey"]).strip() + "\n", encoding="utf-8")
+    shutil.chown(temp_wallet_key, user="root", group="root")
+    os.chmod(temp_wallet_key, 0o600)
+    temp_wallet_key.replace(wallet_key_file)
+
     data = {
-        "authFileVersion": "edgeswarm_linux_auth_v1",
+        "authFileVersion": "edgeswarm_linux_auth_v2",
         "providerEmail": email,
         "accessToken": access_token,
         "refreshToken": refresh_token,
@@ -177,7 +186,6 @@ def main():
         "mfaVerified": True,
         "walletAddress": wallet_identity["walletAddress"],
         "worker": wallet_identity["walletAddress"],
-        "nodeWalletPrivateKey": wallet_identity["privateKey"],
         "walletRecoveredAt": int(time.time())
     }
 

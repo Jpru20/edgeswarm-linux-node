@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 import json
 import os
+import platform
 import subprocess
 from pathlib import Path
+
+try:
+    from edgeswarm_linux_neural import build_linux_neural_readiness
+except Exception:
+    build_linux_neural_readiness = None
 
 API_BASE = os.getenv("EDGESWARM_API_BASE", "https://api.edgeswarm.io")
 SERVICE_NAME = "edgeswarm-node"
@@ -118,32 +124,81 @@ def get_latest_logs():
     return "\n".join(lines[-14:]) or "[No logs available yet.]"
 
 
+def _ui_normalize_architecture_v1(value):
+    value = str(value or "").strip().lower()
+    if value in ("x86_64", "amd64", "x64"):
+        return "x64"
+    if value in ("aarch64", "arm64"):
+        return "arm64"
+    return value or "unknown"
+
+
+def _ui_level_for_capability_v1(capability):
+    capability = str(capability or "").strip()
+    if capability == "Neural-Inference-3B":
+        return 2
+    if capability in ("Neural-Inference-7B", "Neural-Inference-8B"):
+        return 3
+    if capability == "Neural-Inference-14B":
+        return 4
+    if capability in (
+        "Neural-Inference-24B",
+        "Neural-Inference-27B",
+        "Neural-Inference-30B",
+    ):
+        return 5
+    return 1
+
+
 def detect_model_status():
-    qwen7b = MODEL_DIR / "Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+    fallback_arch = _ui_normalize_architecture_v1(platform.machine())
 
-    if qwen7b.exists():
+    if build_linux_neural_readiness is None:
         return {
-            "level": "Level 3 Node",
-            "modelId": "qwen2.5:7b",
-            "capability": "Neural-Inference-7B",
-            "neural": True,
+            "level": "Level 1 Node",
+            "edgeLevel": 1,
+            "modelId": "none",
+            "capability": None,
+            "neural": False,
+            "architecture": fallback_arch,
+            "fallbackModels": [],
         }
 
-    ggufs = list(MODEL_DIR.glob("*.gguf")) if MODEL_DIR.exists() else []
-    if ggufs:
-        return {
-            "level": "Model Ready",
-            "modelId": ggufs[0].name,
-            "capability": "Neural-Inference",
-            "neural": True,
-        }
+    try:
+        readiness = build_linux_neural_readiness()
+        primary = readiness.get("primaryModelId")
+        model_status = readiness.get("modelStatus") or {}
+        primary_info = model_status.get(primary) or {} if primary else {}
+        capability = primary_info.get("capability")
+        level = _ui_level_for_capability_v1(capability)
+        profile = readiness.get("hardwareProfile") or {}
+        architecture = _ui_normalize_architecture_v1(
+            profile.get("architecture") or fallback_arch
+        )
 
-    return {
-        "level": "Level 1 Node",
-        "modelId": "none",
-        "capability": None,
-        "neural": False,
-    }
+        return {
+            "level": f"Level {level} Node",
+            "edgeLevel": level,
+            "modelId": primary or "none",
+            "capability": capability,
+            "neural": bool(primary and readiness.get("neuralEligible")),
+            "architecture": architecture,
+            "fallbackModels": readiness.get("fallbackModels") or [],
+            "missingRequiredModels": readiness.get("missingRequiredModels") or [],
+            "level4Ready": bool(readiness.get("level4Ready")),
+            "runtime": readiness.get("runtime"),
+            "runtimeAcceleration": readiness.get("runtimeAcceleration"),
+        }
+    except Exception:
+        return {
+            "level": "Level 1 Node",
+            "edgeLevel": 1,
+            "modelId": "none",
+            "capability": None,
+            "neural": False,
+            "architecture": fallback_arch,
+            "fallbackModels": [],
+        }
 
 
 def get_hardware_id():
@@ -174,7 +229,7 @@ def get_ledger_defaults(model):
         "usd": status.get("ledgerUsd", "—"),
         "rewards": status.get(
             "rewards",
-            "Level 3 enabled" if model.get("neural") else "Level 1 enabled",
+            f"{str(model.get('level') or 'Level 1 Node').replace(' Node', '')} enabled",
         ),
         "lastSync": status.get("lastLedgerSync", "Not synced"),
     }

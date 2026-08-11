@@ -10,6 +10,7 @@ from pathlib import Path
 from eth_account import Account
 
 AUTH_PATH = Path("/etc/edgeswarm-node-auth.json")
+WALLET_KEY_PATH = Path(os.getenv("EDGESWARM_WALLET_KEY_FILE", "/etc/edgeswarm-node-wallet.key"))
 STATUS_DIR = Path("/var/lib/edgeswarm-node")
 STATUS_PATH = STATUS_DIR / "ui_status.json"
 
@@ -147,11 +148,24 @@ def main():
         expected_wallet,
     )
 
+    wallet_tmp = Path(str(WALLET_KEY_PATH) + ".tmp")
+    wallet_tmp.write_text(private_key.strip() + "\n", encoding="utf-8")
+    shutil.chown(wallet_tmp, user="root", group="root")
+    os.chmod(wallet_tmp, 0o600)
+    wallet_tmp.replace(WALLET_KEY_PATH)
+
+    for secret_key in (
+        "nodeWalletPrivateKey",
+        "walletPrivateKey",
+        "privateKey",
+    ):
+        data.pop(secret_key, None)
+
     data["walletAddress"] = wallet_address
     data["worker"] = wallet_address
     data["nodeWalletPrivateKey"] = private_key
 
-    data["authFileVersion"] = "edgeswarm_linux_auth_v1"
+    data["authFileVersion"] = "edgeswarm_linux_auth_v2"
     data["providerEmail"] = provider
     data["mfaVerified"] = bool(data.get("mfaVerified", True))
     data["installedAt"] = int(time.time())

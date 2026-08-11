@@ -1,4 +1,4 @@
-# EdgeSwarm Linux Node v0.1.9 Public Beta
+# EdgeSwarm Linux Node
 
 Headless Linux node for EdgeSwarm deterministic and local neural execution.
 
@@ -15,4 +15,4 @@ python3 edgeswarm_model_provisioner.py --smoke-recommended
 
 Only enable neural after smoke passes.
 
-This is a public beta while production trust hardening is finalized.
+Release channel and public-release safety are determined from packaged release metadata and backend manifest verification.

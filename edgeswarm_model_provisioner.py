@@ -200,7 +200,7 @@ def select_recommended_artifact(recommended_model):
             or model.get("id")
         ),
         "capability": model.get("capability"),
-        "files": [selected],
+        "files": files if model.get("pack") else [selected],
     }
 
 
@@ -324,6 +324,9 @@ def verify_file(path, expected_sha256):
     path = Path(path)
     expected = str(expected_sha256 or "").strip().lower()
 
+    if not expected:
+        return {"ok": False, "path": str(path), "reason": "missing_sha256"}
+
     if not path.exists():
         _forget_cached_verification(path)
         return {
@@ -405,6 +408,9 @@ def verify_recommended(recommendation_data=None):
 
 def download_file(url, final_path, expected_sha256=None):
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    if not str(expected_sha256 or "").strip():
+        raise RuntimeError("missing_required_sha256")
+
 
     final_path = Path(final_path)
     temp_path = Path(str(final_path) + ".download")
@@ -483,6 +489,43 @@ def download_file(url, final_path, expected_sha256=None):
     raise RuntimeError(f"download_failed:{final_path.name}:{last_error}")
 
 
+def validate_download_budget_v1(files):
+    try:
+        max_auto_gb = float(os.getenv("EDGESWARM_MAX_AUTO_MODEL_DOWNLOAD_GB", "32"))
+    except (TypeError, ValueError):
+        max_auto_gb = 32.0
+    try:
+        reserve_gb = float(os.getenv("EDGESWARM_MODEL_DISK_RESERVE_GB", "5"))
+    except (TypeError, ValueError):
+        reserve_gb = 5.0
+    max_auto_gb = max(1.0, max_auto_gb)
+    reserve_gb = max(1.0, reserve_gb)
+    pending_gb = 0.0
+    for item in files or []:
+        filename = os.path.basename(str(item.get("filename") or ""))
+        sha = str(item.get("sha256") or "").strip()
+        if not filename or not sha:
+            return {"ok": False, "error": "missing_required_artifact_metadata"}
+        existing = verify_file(MODEL_DIR / filename, sha)
+        if existing.get("ok"):
+            continue
+        size_gb = _float_or_none(item.get("sizeGb"))
+        if not size_gb:
+            size_bytes = _float_or_none(item.get("sizeBytes"))
+            if size_bytes:
+                size_gb = size_bytes / (1024 ** 3)
+        if not size_gb or size_gb <= 0:
+            return {"ok": False, "error": "missing_artifact_size", "filename": filename}
+        pending_gb += float(size_gb)
+    free_gb = get_disk_free_gb()
+    if pending_gb > max_auto_gb:
+        return {"ok": False, "error": "auto_download_size_limit_exceeded", "pendingGb": round(pending_gb, 2), "maxAutoDownloadGb": max_auto_gb}
+    if free_gb is None:
+        return {"ok": False, "error": "disk_free_unknown"}
+    if free_gb < pending_gb + reserve_gb:
+        return {"ok": False, "error": "insufficient_disk_space", "pendingGb": round(pending_gb, 2), "diskFreeGb": free_gb, "reserveGb": reserve_gb}
+    return {"ok": True, "pendingGb": round(pending_gb, 2), "diskFreeGb": free_gb, "reserveGb": reserve_gb, "maxAutoDownloadGb": max_auto_gb}
+
 def download_recommended(recommendation_data=None):
     if recommendation_data is None:
         recommendation_data = fetch_recommendation()["recommendation"]
@@ -496,6 +539,15 @@ def download_recommended(recommendation_data=None):
             "ok": False,
             "error": "no_downloadable_files",
             "recommendation": recommendation,
+        }
+
+    budget = validate_download_budget_v1(files)
+    if not budget.get("ok"):
+        return {
+            "ok": False,
+            "error": budget.get("error") or "download_budget_rejected",
+            "modelId": selection.get("modelId"),
+            "budget": budget,
         }
 
     results = []
@@ -593,12 +645,14 @@ def full_setup():
     should_download = bool(recommendation_data.get("shouldDownload"))
 
     if not should_download:
+        verify_existing = verify_recommended(recommendation_data)
         return {
-            "ok": True,
+            "ok": bool(verify_existing.get("ok")),
             "skipped": True,
             "reason": "backend_download_not_requested",
             "shouldDownload": False,
             "modelId": model_id,
+            "verify": verify_existing,
             "recommendation": recommendation,
         }
 

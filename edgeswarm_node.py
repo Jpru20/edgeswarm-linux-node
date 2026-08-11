@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-EdgeSwarm Mac/Linux deterministic node v0.1.0 private candidate.
+EdgeSwarm Linux compute node.
 
 Scope:
 - Heartbeat to /admin/node-heartbeat
@@ -9,17 +9,12 @@ Scope:
 - Data-Scraper deterministic lane
 - Distributed-Compute deterministic lane
 - Submit results to /enterprise/submit-result
-- Honest Mac/Linux private-candidate trust profile telemetry
+- Release-metadata-driven trust profile telemetry
 
-Intentionally not included in v0.1.0:
-- UI
-- Supabase login/vault
-- llama.cpp local neural inference
-- public release auto-update
-- public signing/notarization claims
 """
 
 import argparse
+import atexit
 import ast
 import base64
 import hashlib
@@ -42,9 +37,11 @@ except Exception:
     run_local_linux_neural_inference = None
 
 import re
+import select
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from pathlib import Path
@@ -61,17 +58,7 @@ except Exception:
     encode_defunct = None
 
 
-APP_VERSION = "0.1.10"
-# EDGE_SWARM_LINUX_AUTH_HEADERS_COMPAT_V1
-
-def build_auth_headers() -> dict:
-    token = get_edgeswarm_auth_token_v1()
-
-    if token:
-        return {"Authorization": f"Bearer {token}"}
-
-    return {}
-
+APP_VERSION = "0.1.11"
 APP_TYPE = "cross-platform-node"
 NODE_TYPE = "laptop"
 
@@ -254,6 +241,110 @@ def build_auth_headers() -> dict:
     return {}
 
 
+class EdgeSwarmAuthError(RuntimeError):
+    pass
+
+
+class EdgeSwarmUpdateRequiredError(RuntimeError):
+    pass
+
+
+def authenticated_request_v1(method: str, url: str, headers: Optional[Dict[str, str]] = None, **kwargs):
+    request_headers = dict(headers or {})
+    auth_headers = build_auth_headers()
+
+    if not auth_headers.get("Authorization"):
+        raise EdgeSwarmAuthError("missing_or_invalid_supabase_bearer")
+
+    request_headers.update(auth_headers)
+    response = requests.request(
+        str(method or "GET").upper(),
+        url,
+        headers=request_headers,
+        **kwargs,
+    )
+
+    if response.status_code == 426:
+        log("[UPDATE] Backend returned HTTP 426. Linux node update is required.")
+        raise EdgeSwarmUpdateRequiredError("linux_node_update_required_http_426")
+
+    if response.status_code != 401:
+        return response
+
+    log("[AUTH] HTTP 401 received. Forcing one Supabase session refresh and retry.")
+    refreshed = edgeswarm_refresh_auth_session_v1(
+        load_edgeswarm_auth_session_v1()
+    )
+    refreshed_token = str(
+        refreshed.get("accessToken") or ""
+    ).strip()
+
+    if not refreshed_token:
+        raise EdgeSwarmAuthError(
+            "supabase_session_refresh_failed_after_401"
+        )
+
+    request_headers["Authorization"] = f"Bearer {refreshed_token}"
+    response = requests.request(
+        str(method or "GET").upper(),
+        url,
+        headers=request_headers,
+        **kwargs,
+    )
+
+    if response.status_code == 426:
+        log("[UPDATE] Backend returned HTTP 426 after auth refresh. Linux node update is required.")
+        raise EdgeSwarmUpdateRequiredError("linux_node_update_required_http_426")
+
+    if response.status_code == 401:
+        log("[AUTH] Bearer rejected after one forced refresh. Failing closed.")
+        raise EdgeSwarmAuthError(
+            "supabase_bearer_rejected_after_single_refresh"
+        )
+
+    return response
+
+
+def submit_result_with_retry_v1(payload: Dict[str, Any], timeout: int = 20, label: str = "[SUBMIT]") -> bool:
+    retryable_statuses = {408, 425, 429}
+    for attempt in range(1, 4):
+        try:
+            res = authenticated_request_v1("POST", GCP_UPLOAD_URL, json=payload, timeout=timeout)
+        except (EdgeSwarmAuthError, EdgeSwarmUpdateRequiredError):
+            raise
+        except requests.RequestException as exc:
+            log(f"{label} network failure attempt={attempt}/3: {exc}")
+            if attempt >= 3:
+                return False
+            time.sleep(attempt)
+            continue
+        code = int(getattr(res, "status_code", 0) or 0)
+        log(f"{label} HTTP {code} {str(getattr(res, 'text', ''))[:500]}")
+        if code in (200, 201, 202):
+            return True
+        if code not in retryable_statuses and not 500 <= code <= 599:
+            return False
+        if attempt < 3:
+            time.sleep(attempt)
+    return False
+
+
+def submit_task_failure_v1(task, provider_email, wallet_address, hardware_id, private_key, error_code, message, required_model=None) -> bool:
+    task_id = task.get("taskId")
+    ai_output = json.dumps({"error": str(error_code), "message": str(message or error_code)[:500]}, separators=(",", ":"))
+    file_hash = hashlib.sha256(ai_output.encode("utf-8")).hexdigest()
+    signature = sign_result(task_id, 0, file_hash, hardware_id, private_key)
+    payload = {"fileHash": file_hash, "payload": {"taskId": task_id, "wallet_address": wallet_address, "walletAddress": wallet_address, "worker": wallet_address, "providerEmail": get_edgeswarm_auth_email_v1() or provider_email, "score": 0, "latency_ms": 0, "hardwareId": hardware_id, "bounty": task.get("bounty", 0), "signature": signature, "aiOutput": ai_output, "aiTranslation": None, "status": "error", "requiredModel": required_model, "model_id_used": "linux-local-failure"}}
+    return submit_result_with_retry_v1(payload, timeout=20, label="[FAIL SUBMIT]")
+
+
+def edgeswarm_ai_output_is_error_v1(ai_output: str) -> bool:
+    try:
+        parsed = json.loads(str(ai_output or ""))
+    except Exception:
+        return False
+    return isinstance(parsed, dict) and bool(parsed.get("error"))
+
 def sign_result(task_id, score, file_hash, hardware_id, private_key=None) -> str:
     if not private_key:
         raise ValueError(
@@ -287,10 +378,6 @@ GCP_UPLOAD_URL = f"{GCP_BASE_URL}/enterprise/submit-result"
 GCP_HEARTBEAT_URL = f"{GCP_BASE_URL}/admin/node-heartbeat"
 GCP_MANIFEST_URL = f"{GCP_BASE_URL}/v1/node/update-manifest"
 
-NODE_HEARTBEAT_KEY = os.getenv(
-    "NODE_HEARTBEAT_KEY",
-    "edgeswarm-heartbeat-2026-v1-5-super-long-random-key",
-)
 
 NODE_STARTED_AT = time.time()
 POLL_LIMIT = int(os.getenv("EDGE_POLL_LIMIT", "1"))
@@ -860,39 +947,224 @@ def normalize_neural_response_for_submit(raw_response):
 
     return text.strip()
 
-def process_linux_neural_task_v1(task, provider_email, wallet_address, hardware_id, private_key):
+def run_isolated_process_v1(command, stdin_text, deadline_sec, heartbeat_callback=None, heartbeat_interval_sec=15):
+    started = time.monotonic()
+    last_heartbeat = started
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout_file, tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr_file:
+        proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=stdout_file, stderr=stderr_file, text=True)
+        try:
+            if proc.stdin is None:
+                raise RuntimeError("isolated_process_stdin_unavailable")
+            try:
+                proc.stdin.write(str(stdin_text or ""))
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+            while proc.poll() is None:
+                now = time.monotonic()
+                if now - started >= deadline_sec:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=3)
+                    return {"timedOut": True, "returnCode": proc.returncode, "stdout": "", "stderr": ""}
+                if heartbeat_callback is not None and now - last_heartbeat >= heartbeat_interval_sec:
+                    heartbeat_callback()
+                    last_heartbeat = now
+                time.sleep(0.25)
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            return {"timedOut": False, "returnCode": proc.returncode, "stdout": stdout_file.read(), "stderr": stderr_file.read()}
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=3)
+
+
+_LINUX_NEURAL_WORKER_PROCESS_V1 = None
+
+
+def stop_linux_neural_worker_process_v1():
+    global _LINUX_NEURAL_WORKER_PROCESS_V1
+    proc = _LINUX_NEURAL_WORKER_PROCESS_V1
+    _LINUX_NEURAL_WORKER_PROCESS_V1 = None
+    if proc is None:
+        return
+    try:
+        if proc.stdin is not None:
+            proc.stdin.close()
+    except Exception:
+        pass
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=3)
+    try:
+        if proc.stdout is not None:
+            proc.stdout.close()
+    except Exception:
+        pass
+
+
+def ensure_linux_neural_worker_process_v1():
+    global _LINUX_NEURAL_WORKER_PROCESS_V1
+    proc = _LINUX_NEURAL_WORKER_PROCESS_V1
+    if proc is not None and proc.poll() is None:
+        return proc
+    stop_linux_neural_worker_process_v1()
+    worker_script = Path(run_local_linux_neural_inference.__code__.co_filename).resolve()
+    proc = subprocess.Popen(
+        [sys.executable, str(worker_script), "--worker-loop"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        bufsize=1,
+    )
+    if proc.stdin is None or proc.stdout is None:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise RuntimeError("persistent_neural_worker_pipe_unavailable")
+    _LINUX_NEURAL_WORKER_PROCESS_V1 = proc
+    return proc
+
+
+def run_linux_neural_worker_process_v1(prompt, required_model, max_tokens=None, selected_model=None, heartbeat_context=None):
+    try:
+        deadline_sec = int(os.getenv("EDGESWARM_NEURAL_LOCAL_DEADLINE_SEC", "240"))
+    except (TypeError, ValueError):
+        deadline_sec = 240
+    deadline_sec = max(30, min(300, deadline_sec))
+    try:
+        heartbeat_interval = int(os.getenv("EDGESWARM_NEURAL_HEARTBEAT_INTERVAL_SEC", "15"))
+    except (TypeError, ValueError):
+        heartbeat_interval = 15
+    heartbeat_interval = max(5, min(30, heartbeat_interval))
+
+
+    request = {
+        "prompt": prompt,
+        "requiredModel": required_model,
+        "selectedModel": selected_model,
+        "maxOutputTokens": max_tokens,
+    }
+
+    try:
+        proc = ensure_linux_neural_worker_process_v1()
+        proc.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+        proc.stdin.flush()
+    except Exception as exc:
+        stop_linux_neural_worker_process_v1()
+        return {"ok": False, "error": "neural_worker_start_or_write_failed", "details": str(exc)[:500], "workerProcessIsolated": True}
+
+    started = time.monotonic()
+    last_heartbeat = started
+
+    while True:
+        if proc.poll() is not None:
+            stop_linux_neural_worker_process_v1()
+            return {"ok": False, "error": "neural_worker_exited_nonzero", "workerProcessIsolated": True}
+
+        now = time.monotonic()
+        if now - started >= deadline_sec:
+            stop_linux_neural_worker_process_v1()
+            return {"ok": False, "error": "local_neural_execution_timeout", "deadlineSec": deadline_sec, "workerProcessIsolated": True}
+
+        if heartbeat_context and now - last_heartbeat >= heartbeat_interval:
+            send_heartbeat(
+                heartbeat_context["provider_email"],
+                heartbeat_context["wallet_address"],
+                heartbeat_context["hardware_id"],
+                heartbeat_context["hardware_profile"],
+                heartbeat_context["trust_profile"],
+                current_task_ids=[heartbeat_context["task_id"]],
+                status="online",
+            )
+            last_heartbeat = time.monotonic()
+
+        ready, _, _ = select.select([proc.stdout], [], [], 0.25)
+        if not ready:
+            continue
+
+        line = proc.stdout.readline()
+        if not line:
+            continue
+
+        try:
+            result = json.loads(line)
+        except Exception:
+            stop_linux_neural_worker_process_v1()
+            return {"ok": False, "error": "neural_worker_invalid_response", "details": str(line)[-500:], "workerProcessIsolated": True}
+
+        if not isinstance(result, dict):
+            stop_linux_neural_worker_process_v1()
+            return {"ok": False, "error": "neural_worker_invalid_result", "workerProcessIsolated": True}
+
+        result["workerProcessIsolated"] = True
+        result["workerProcessPersistent"] = True
+        return result
+
+
+atexit.register(stop_linux_neural_worker_process_v1)
+
+def process_linux_neural_task_v1(task, provider_email, wallet_address, hardware_id, private_key, hardware_profile=None, trust_profile=None):
     task = task or {}
     task_id = task.get("taskId")
     prompt = task.get("prompt") or ""
     required_model = task.get("requiredModel") or task.get("required_model") or "Neural-Inference"
+    selected_model = (
+        task.get("selectedModel")
+        or task.get("selected_model")
+        or ""
+    )
+    raw_max_output_tokens = task.get("maxOutputTokens")
+    if raw_max_output_tokens is None:
+        raw_max_output_tokens = task.get("max_output_tokens")
+    try:
+        max_output_tokens = (
+            int(raw_max_output_tokens)
+            if raw_max_output_tokens is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        max_output_tokens = None
 
     if can_handle_linux_neural_task is None or run_local_linux_neural_inference is None:
         log(f"[NEURAL] Linux neural module unavailable. Skipping task {task_id}.")
-        return False
+        return submit_task_failure_v1(task, provider_email, wallet_address, hardware_id, private_key, "linux_neural_module_unavailable", "Linux neural module unavailable.", required_model)
 
-    neural_gate = can_handle_linux_neural_task(str(required_model))
+    neural_gate = can_handle_linux_neural_task(str(required_model), selected_model)
 
     if not neural_gate.get("ok"):
         log(
             "[NEURAL] Task skipped. No ready local Linux model. "
             f"requiredModel={required_model} reason={neural_gate.get('reason')}"
         )
-        return False
+        return submit_task_failure_v1(task, provider_email, wallet_address, hardware_id, private_key, "linux_neural_model_unavailable", str(neural_gate.get("reason") or "no_ready_local_model"), required_model)
 
-    neural_result = run_local_linux_neural_inference(prompt, str(required_model))
+    heartbeat_context = {"provider_email": provider_email, "wallet_address": wallet_address, "hardware_id": hardware_id, "hardware_profile": hardware_profile, "trust_profile": trust_profile, "task_id": task_id} if hardware_profile is not None and trust_profile is not None else None
+    neural_result = run_linux_neural_worker_process_v1(prompt, str(required_model), max_tokens=max_output_tokens, selected_model=selected_model, heartbeat_context=heartbeat_context)
 
     if not neural_result.get("ok"):
         log(
             "[NEURAL] Task failed before submission. "
             f"requiredModel={required_model} error={neural_result.get('error')}"
         )
-        return False
+        return submit_task_failure_v1(task, provider_email, wallet_address, hardware_id, private_key, "linux_neural_inference_failed", str(neural_result.get("error") or "local_neural_inference_failed"), required_model)
 
     clean_response = normalize_neural_response_for_submit(neural_result.get("response"))
-    ai_output = json.dumps(
-        {"response": clean_response},
-        separators=(",", ":"),
-    )
+    structured_response = _extract_first_json_object_from_text(clean_response)
+    if isinstance(structured_response, dict) and str(clean_response).lstrip().startswith("{"):
+        ai_output = json.dumps(structured_response, separators=(",", ":"))
+    else:
+        ai_output = json.dumps({"response": clean_response}, separators=(",", ":"))
     latency = int(neural_result.get("latencyMs") or 0)
     model_id_used = (
         neural_result.get("selectedModel")
@@ -952,9 +1224,7 @@ def process_linux_neural_task_v1(task, provider_email, wallet_address, hardware_
     }
 
     log(f"[NEURAL SUBMIT] Task ID: {task_id} | model_id_used={model_id_used}")
-    res = requests.post(GCP_UPLOAD_URL, json=payload, headers=build_auth_headers(), timeout=30)
-    log(f"[NEURAL SUBMIT] HTTP {res.status_code} {res.text[:500]}")
-    return res.status_code in (200, 201, 202)
+    return submit_result_with_retry_v1(payload, timeout=30, label="[NEURAL SUBMIT]")
 
 
 
@@ -1102,8 +1372,6 @@ def send_heartbeat(
         "metadata": metadata,
     }
 
-    headers = {"x-node-heartbeat-key": NODE_HEARTBEAT_KEY}
-
     try:
         # EDGE_SWARM_LINUX_NEURAL_HEARTBEAT_METADATA_V1
         try:
@@ -1146,12 +1414,12 @@ def send_heartbeat(
                 payload["eligibleModelCapabilities"] = neural_capabilities
                 payload["modelsAvailable"] = ready_models
                 payload["primaryModelId"] = selected_model_id
-                payload["fallbackModels"] = ready_models[1:]
-                payload["missingRequiredModels"] = [
-                    model_id
-                    for model_id, info in model_status.items()
-                    if isinstance(info, dict) and info.get("status") != "ready"
-                ]
+                payload["fallbackModels"] = neural_readiness.get("fallbackModels") or ready_models[1:]
+                payload["missingRequiredModels"] = neural_readiness.get("missingRequiredModels") or []
+                payload["level4Ready"] = bool(neural_readiness.get("level4Ready"))
+                payload["metadata"]["selectedEngine"] = "llama.cpp local neural"
+                payload["metadata"]["primaryModelId"] = selected_model_id
+                payload["metadata"]["fallbackModels"] = payload["fallbackModels"]
 
                 if selected_capability == "Neural-Inference-3B":
                     payload["edgeLevel"] = 2
@@ -1177,7 +1445,7 @@ def send_heartbeat(
                 "error": str(exc)[:200],
             }
 
-        res = requests.post(GCP_HEARTBEAT_URL, json=payload, headers=headers, timeout=8)
+        res = authenticated_request_v1("POST", GCP_HEARTBEAT_URL, json=payload, timeout=8)
         log(f"[HEARTBEAT] HTTP {res.status_code} {res.text[:300]}")
         return res.status_code in (200, 201, 202)
     except Exception as exc:
@@ -1503,7 +1771,7 @@ def run_deterministic_extraction(prompt: Any) -> str:
     return json.dumps(
         {
             "error": "unsupported_exact_extraction",
-            "message": "v0.1.0 deterministic parser could not resolve this prompt.",
+            "message": "Deterministic parser could not resolve this prompt.",
         },
         separators=(",", ":"),
     )
@@ -1717,7 +1985,7 @@ def run_web_scraper(prompt: Any) -> Tuple[str, int]:
     try:
         response = requests.get(
             target_url,
-            headers={"User-Agent": "Mozilla/5.0 EdgeSwarmNode/0.1.0"},
+            headers={"User-Agent": f"Mozilla/5.0 EdgeSwarmNode/{APP_VERSION}"},
             timeout=15,
         )
         latency = int((time.time() - start_time) * 1000)
@@ -1739,7 +2007,7 @@ def run_web_scraper(prompt: Any) -> Tuple[str, int]:
                 {
                     "source_url": target_url,
                     "content": norm_text,
-                    "node_attestation": "EdgeSwarm Mac/Linux private deterministic candidate",
+                    "node_attestation": "EdgeSwarm Linux deterministic node",
                 },
                 separators=(",", ":"),
             ), latency
@@ -1765,39 +2033,14 @@ def run_web_scraper(prompt: Any) -> Tuple[str, int]:
 
 
 
-def sign_result(task_id, score, file_hash, hardware_id, private_key=None) -> str:
-    if not private_key:
-        raise ValueError(
-            "Linux result signing requires the device private key."
-        )
-
-    from eth_account import Account
-    from eth_account.messages import encode_defunct
-
-    message = (
-        f"Task:{task_id}|Score:{score}|"
-        f"Hash:{file_hash}|HW:{hardware_id}"
-    )
-
-    signed = Account.sign_message(
-        encode_defunct(text=message),
-        private_key=private_key,
-    )
-
-    signature = signed.signature.hex()
-
-    return (
-        signature
-        if signature.startswith("0x")
-        else "0x" + signature
-    )
-
 def process_task(
     task: Dict[str, Any],
     provider_email: str,
     wallet_address: str,
     hardware_id: str,
     private_key: str,
+    hardware_profile: Optional[Dict[str, Any]] = None,
+    trust_profile: Optional[Dict[str, Any]] = None,
 ) -> bool:
     task_id = task["taskId"]
     prompt = task.get("prompt") or ""
@@ -1830,6 +2073,8 @@ def process_task(
             wallet_address,
             hardware_id,
             private_key,
+            hardware_profile,
+            trust_profile,
         )
 
     intent = classify_task_intent(prompt, required_model)
@@ -1855,14 +2100,15 @@ def process_task(
             {
                 "error": "unsupported_task_for_mac_linux_v010",
                 "supportedCapabilities": DETERMINISTIC_CAPABILITIES,
-                "message": "v0.1.0 Mac/Linux private candidate only supports deterministic lanes.",
+                "message": "This EdgeSwarm node cannot execute the requested task with its currently available local capabilities.",
             },
             separators=(",", ":"),
         )
         latency = int((time.time() - start) * 1000)
-        model_id_used = "unsupported-v0.1.0"
+        model_id_used = "unsupported-local-capability-v1"
 
-    score = 100
+    execution_failed = edgeswarm_ai_output_is_error_v1(ai_output)
+    score = 0 if execution_failed else 100
     file_hash = hashlib.sha256(ai_output.encode("utf-8")).hexdigest()
     signature = sign_result(task_id, score, file_hash, hardware_id, private_key)
 
@@ -1881,17 +2127,13 @@ def process_task(
             "signature": signature,
             "aiOutput": ai_output,
             "aiTranslation": None,
-            "status": "success",
+            "status": "error" if execution_failed else "success",
             "model_id_used": model_id_used,
         },
     }
 
     log(f"[SUBMIT] Task ID: {task_id} | model_id_used={model_id_used} | output={ai_output[:200]}")
-    res = requests.post(GCP_UPLOAD_URL, json=payload, headers=build_auth_headers(), timeout=20)
-    log(f"[SUBMIT] HTTP {res.status_code} {res.text[:500]}")
-    log(f"[TASK END] Task ID: {task_id}")
-
-    return res.status_code in (200, 201, 202)
+    return submit_result_with_retry_v1(payload, timeout=20, label="[SUBMIT]")
 
 
 def poll_once(provider_email: str, wallet_address: str, hardware_id: str, hardware_profile: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1909,7 +2151,7 @@ def poll_once(provider_email: str, wallet_address: str, hardware_id: str, hardwa
     }
 
     log("[POLL] Polling /swarm/get-jobs")
-    res = requests.get(GCP_GET_JOBS_URL, params=params, timeout=10)
+    res = authenticated_request_v1("GET", GCP_GET_JOBS_URL, params=params, timeout=10)
     log(f"[POLL] HTTP {res.status_code} {res.text[:500]}")
 
     if res.status_code != 200:
@@ -1932,27 +2174,57 @@ def _edgeswarm_auth_file_path_v1() -> str:
 
 def _edgeswarm_save_auth_session_v1(auth: dict) -> None:
     auth_file = _edgeswarm_auth_file_path_v1()
-
+    safe_auth = dict(auth or {})
+    for secret_key in (
+        "nodeWalletPrivateKey",
+        "walletPrivateKey",
+        "privateKey",
+    ):
+        safe_auth.pop(secret_key, None)
+    if safe_auth.get("authFileVersion") == "edgeswarm_linux_auth_v1":
+        safe_auth["authFileVersion"] = "edgeswarm_linux_auth_v2"
     with open(auth_file, "w", encoding="utf-8") as f:
-        json.dump(auth, f, indent=2)
-
+        json.dump(safe_auth, f, indent=2)
 
 def _edgeswarm_is_wallet_address_v1(value: str) -> bool:
     value = str(value or "").strip()
     return value.startswith("0x") and len(value) == 42
 
 
+def _edgeswarm_load_wallet_private_key_v2(auth: dict) -> str:
+    direct = str(
+        os.getenv("EDGE_PRIVATE_KEY")
+        or os.getenv("EDGESWARM_PRIVATE_KEY")
+        or ""
+    ).strip()
+    if direct:
+        return direct
+
+    credential_dir = str(os.getenv("CREDENTIALS_DIRECTORY") or "").strip()
+    candidates = []
+    if credential_dir:
+        candidates.append(Path(credential_dir) / "wallet-private-key")
+
+    configured_path = str(os.getenv("EDGESWARM_WALLET_KEY_FILE") or "").strip()
+    if configured_path:
+        candidates.append(Path(configured_path))
+
+    candidates.append(Path("/etc/edgeswarm-node-wallet.key"))
+
+    for path in candidates:
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+            if value:
+                return value
+        except Exception:
+            continue
+
+    return ""
+
 def _edgeswarm_load_or_create_linux_wallet_v1(provider_email: str) -> Tuple[str, str]:
     auth = load_edgeswarm_auth_session_v1()
 
-    private_key = (
-        os.getenv("EDGE_PRIVATE_KEY")
-        or os.getenv("EDGESWARM_PRIVATE_KEY")
-        or auth.get("nodeWalletPrivateKey")
-        or auth.get("walletPrivateKey")
-        or auth.get("privateKey")
-        or ""
-    ).strip()
+    private_key = _edgeswarm_load_wallet_private_key_v2(auth)
 
     wallet_address = (
         os.getenv("EDGE_WALLET_ADDRESS")
@@ -1995,8 +2267,6 @@ def _edgeswarm_load_or_create_linux_wallet_v1(provider_email: str) -> Tuple[str,
     auth["worker"] = wallet_address
     auth["nodeWalletCreatedAt"] = auth.get("nodeWalletCreatedAt") or int(time.time())
 
-    if private_key:
-        auth["nodeWalletPrivateKey"] = private_key
 
     _edgeswarm_save_auth_session_v1(auth)
 
@@ -2005,8 +2275,7 @@ def _edgeswarm_load_or_create_linux_wallet_v1(provider_email: str) -> Tuple[str,
 
 def register_provider_node_profile_v1(provider_email: str, wallet_address: str, hardware_id: str, hardware_profile: Dict[str, Any]) -> None:
     if not provider_email or not wallet_address or not hardware_id:
-        log("[WALLET] Provider node registration skipped: missing provider, wallet, or hardware id.")
-        return
+        raise RuntimeError("provider_node_registration_identity_missing")
 
     payload = {
         "providerEmail": provider_email,
@@ -2020,28 +2289,36 @@ def register_provider_node_profile_v1(provider_email: str, wallet_address: str, 
         "nodeLabel": hardware_profile.get("hostname") or "Linux Desktop Node",
     }
 
+    res = authenticated_request_v1(
+        "POST",
+        f"{GCP_BASE_URL}/v1/provider/register-node",
+        json=payload,
+        timeout=10,
+    )
+
     try:
-        res = requests.post(
-            f"{GCP_BASE_URL}/v1/provider/register-node",
-            json=payload,
-            timeout=10,
+        data = res.json()
+    except Exception:
+        data = {"raw": res.text[:300]}
+
+    if res.status_code not in (200, 201):
+        raise RuntimeError(
+            f"provider_node_registration_http_{res.status_code}:{str(data)[:300]}"
         )
 
-        try:
-            data = res.json()
-        except Exception:
-            data = {"raw": res.text[:300]}
+    node = data.get("node") or {}
+    registered_hardware = str(node.get("hardwareId") or node.get("hardware_id") or "").strip().lower()
+    registered_provider = str(node.get("providerEmail") or node.get("provider_email") or "").strip().lower()
+    registered_wallet = str(node.get("walletAddress") or node.get("wallet_address") or "").strip().lower()
 
-        if res.status_code in (200, 201):
-            node = data.get("node") or {}
-            registered_wallet = node.get("walletAddress") or node.get("wallet_address") or wallet_address
-            log(f"[WALLET] Provider node profile {data.get('status')}: {registered_wallet[:10]}...")
-            return
+    if registered_hardware != str(hardware_id).strip().lower():
+        raise RuntimeError("provider_node_registration_hardware_mismatch")
+    if registered_provider != str(provider_email).strip().lower():
+        raise RuntimeError("provider_node_registration_provider_mismatch")
+    if registered_wallet != str(wallet_address).strip().lower():
+        raise RuntimeError("provider_node_registration_wallet_mismatch")
 
-        log(f"[WALLET] Provider node registration failed HTTP {res.status_code}: {str(data)[:300]}")
-    except Exception as exc:
-        log(f"[WALLET] Provider node registration error: {exc}")
-
+    log(f"[WALLET] Provider node profile {data.get('status')}: {wallet_address[:10]}...")
 
 def load_identity_from_env() -> Tuple[str, str, str]:
     auth = ensure_edgeswarm_auth_session_v1()
@@ -2065,6 +2342,26 @@ def load_identity_from_env() -> Tuple[str, str, str]:
     return provider_email, wallet_address, private_key
 
 
+def write_linux_ui_status_v1(patch):
+    status_path = Path("/var/lib/edgeswarm-node/ui_status.json")
+    try:
+        current = {}
+        if status_path.exists():
+            try:
+                current = json.loads(status_path.read_text())
+            except Exception:
+                current = {}
+        current.update(dict(patch or {}))
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = status_path.with_suffix(".json.tmp")
+        temp_path.write_text(json.dumps(current, indent=2))
+        temp_path.replace(status_path)
+        return True
+    except Exception as exc:
+        log(f"[UI STATUS] write failed: {type(exc).__name__}: {exc}")
+        return False
+
+
 def run_node(args: argparse.Namespace) -> None:
     provider_email, wallet_address, private_key = load_identity_from_env()
 
@@ -2073,7 +2370,7 @@ def run_node(args: argparse.Namespace) -> None:
     register_provider_node_profile_v1(provider_email, wallet_address, hardware_id, hardware_profile)
     trust_profile = build_trust_profile(hardware_profile)
 
-    log(f"[NODE] EdgeSwarm Mac/Linux deterministic node v{APP_VERSION}")
+    log(f"[NODE] EdgeSwarm Linux node v{APP_VERSION}")
     log(
         f"[NODE] osType={hardware_profile.get('osType')} "
         f"arch={hardware_profile.get('architecture')} "
@@ -2081,8 +2378,9 @@ def run_node(args: argparse.Namespace) -> None:
     )
     log(f"[NODE] capabilities={','.join(get_node_capabilities())}")
     log(
-        "[TRUST] releaseChannel=private_candidate "
-        f"publicReleaseSafe=false runtimeSha256={trust_profile.get('runtimeSha256')}"
+        f"[TRUST] releaseChannel={trust_profile.get('releaseChannel') or 'unknown'} "
+        f"publicReleaseSafe={str(bool(trust_profile.get('publicReleaseSafe'))).lower()} "
+        f"runtimeSha256={trust_profile.get('runtimeSha256')}"
     )
 
     check_manifest(hardware_profile)
@@ -2110,6 +2408,12 @@ def run_node(args: argparse.Namespace) -> None:
                 for task in tasks:
                     task_id = task.get("taskId")
 
+                    write_linux_ui_status_v1({
+                        "taskStatus": "processing",
+                        "currentTaskId": task_id,
+                        "currentTaskStartedAt": int(time.time()),
+                    })
+
                     send_heartbeat(
                         provider_email,
                         wallet_address,
@@ -2121,10 +2425,19 @@ def run_node(args: argparse.Namespace) -> None:
                     )
 
                     try:
-                        process_task(task, provider_email, wallet_address, hardware_id, private_key)
+                        process_task(task, provider_email, wallet_address, hardware_id, private_key, hardware_profile, trust_profile)
                     except Exception as exc:
                         log(f"[TASK CRASH] Task ID: {task_id} | {type(exc).__name__}: {exc}")
                         log(traceback.format_exc())
+                    finally:
+                        log(f"[TASK END] Task ID: {task_id}")
+                        write_linux_ui_status_v1({
+                            "taskStatus": "idle",
+                            "currentTaskId": None,
+                            "currentTaskStartedAt": None,
+                            "lastTaskId": task_id,
+                            "lastTaskEndedAt": int(time.time()),
+                        })
 
                     send_heartbeat(
                         provider_email,
@@ -2179,7 +2492,7 @@ def run_local_self_test() -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="EdgeSwarm Mac/Linux deterministic node v0.1.0 private candidate"
+        description=f"EdgeSwarm Linux node v{APP_VERSION}"
     )
     parser.add_argument("--once", action="store_true", help="Send heartbeat, poll once, process assigned tasks, then exit.")
     parser.add_argument("--heartbeat-only", action="store_true", help="Send one heartbeat and exit.")

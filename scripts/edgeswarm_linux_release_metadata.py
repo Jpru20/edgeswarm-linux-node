@@ -188,7 +188,7 @@ def main():
     elif hash_recognized:
         hash_status = (
             manifest.get("hashStatus")
-            or "recognized_public_beta_package"
+            or "recognized_package"
         )
     elif not version_matches:
         hash_status = (
@@ -216,7 +216,7 @@ def main():
         "releaseChannel": (
             packaged_metadata.get("releaseChannel")
             or manifest.get("releaseChannel")
-            or "public_beta"
+            or "private_candidate"
         ),
         "packageType": packaged_package_type,
         "packageSha256": package_sha,
@@ -236,12 +236,12 @@ def main():
         "signatureType": (
             packaged_metadata.get("signatureType")
             or manifest.get("signatureType")
-            or "unsigned_public_beta"
+            or "unsigned_private_candidate"
         ),
         "signerStatus": (
             packaged_metadata.get("signerStatus")
             or manifest.get("signerStatus")
-            or "unsigned_public_beta"
+            or "unsigned_private_candidate"
         ),
         "notes": (
             packaged_metadata.get("notes")

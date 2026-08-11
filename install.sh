@@ -50,6 +50,14 @@ print(
 PY_RUNTIME
 
 
+if [[ -s /etc/edgeswarm-node-auth.json ]]; then
+  echo "[EdgeSwarm] Checking Linux wallet credential migration."
+  "$SOURCE_PYTHON" "$SRC_DIR/scripts/edgeswarm_linux_migrate_wallet_key.py" /etc/edgeswarm-node-auth.json /etc/edgeswarm-node-wallet.key || {
+    echo "[EdgeSwarm] Existing wallet credential migration failed."
+    exit 1
+  }
+fi
+
 EXISTING_AUTH_PRESENT="0"
 
 if [[ -s /etc/edgeswarm-node-auth.json ]]; then
@@ -86,7 +94,7 @@ provider = (
 
 raise SystemExit(
     0
-    if access_token and refresh_token and provider and private_key
+    if access_token and refresh_token and provider and (private_key or Path("/etc/edgeswarm-node-wallet.key").is_file())
     else 1
 )
 PY_EXISTING_AUTH
@@ -223,7 +231,10 @@ upsert_env "SUPABASE_URL" "$SUPABASE_URL_DEFAULT"
 upsert_env "SUPABASE_ANON_KEY" "$SUPABASE_ANON_KEY_DEFAULT"
 upsert_env "EDGESWARM_INSTALL_DIR" "$INSTALL_DIR"
 upsert_env "EDGESWARM_MODEL_DIR" "/var/lib/edgeswarm-node/models"
+upsert_env "EDGESWARM_MAX_AUTO_MODEL_DOWNLOAD_GB" "32"
+upsert_env "EDGESWARM_MODEL_DISK_RESERVE_GB" "5"
 upsert_env "EDGESWARM_AUTH_FILE" "/etc/edgeswarm-node-auth.json"
+upsert_env "EDGESWARM_WALLET_KEY_FILE" "/etc/edgeswarm-node-wallet.key"
 upsert_env "EDGESWARM_ENABLE_AUTO_UPDATE" "$PACKAGED_PUBLIC_RELEASE_SAFE"
 
 touch /etc/edgeswarm-node-auth.json
@@ -248,9 +259,23 @@ User=${SERVICE_USER}
 Group=${SERVICE_USER}
 WorkingDirectory=${INSTALL_DIR}
 EnvironmentFile=-${ENV_FILE}
+LoadCredential=wallet-private-key:/etc/edgeswarm-node-wallet.key
+Environment=PYTHONNOUSERSITE=1
 ExecStart=${INSTALL_DIR}/runtime/bin/edgeswarm-python ${INSTALL_DIR}/edgeswarm_node.py
 Restart=always
 RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0077
+ReadWritePaths=/etc/edgeswarm-node-auth.json
+KillMode=control-group
+TimeoutStopSec=20s
 
 [Install]
 WantedBy=multi-user.target

@@ -9,9 +9,23 @@ User=edgeswarm
 Group=edgeswarm
 WorkingDirectory=/opt/edgeswarm-node
 EnvironmentFile=-/etc/edgeswarm-node.env
+LoadCredential=wallet-private-key:/etc/edgeswarm-node-wallet.key
+Environment=PYTHONNOUSERSITE=1
 ExecStart=/opt/edgeswarm-node/runtime/bin/edgeswarm-python /opt/edgeswarm-node/edgeswarm_node.py
 Restart=always
 RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0077
+ReadWritePaths=/etc/edgeswarm-node-auth.json
+KillMode=control-group
+TimeoutStopSec=20s
 
 [Install]
 WantedBy=multi-user.target

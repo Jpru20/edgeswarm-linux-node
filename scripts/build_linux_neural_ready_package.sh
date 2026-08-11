@@ -224,7 +224,12 @@ PY
     -type f \
     -name '*.py' \
     -print0 \
-  | xargs -0 "$PYTHON" -m py_compile
+  | xargs -0 env PYTHONPYCACHEPREFIX="$TMP/package-pycache-$package_type" "$PYTHON" -m py_compile
+
+  if find "$destination" -path "$destination/runtime" -prune -o \( -type d -name "__pycache__" -o -type f -name "*.pyc" \) -print -quit | grep -q .; then
+    echo "Package staging generated forbidden Python bytecode." >&2
+    exit 1
+  fi
 
   find "$destination" \
     -path "$destination/runtime" -prune -o \
@@ -346,6 +351,14 @@ case "${1:-}" in
     rm -f /usr/local/bin/edgeswarm
     rm -f /usr/share/applications/edgeswarm-node.desktop
     rm -rf /opt/edgeswarm-node
+
+    if [ "${1:-}" = "purge" ]; then
+      rm -f /etc/edgeswarm-node-auth.json
+      rm -f /etc/edgeswarm-node-wallet.key
+      rm -f /etc/edgeswarm-node.env
+      rm -rf /var/lib/edgeswarm-node
+      rm -rf /var/log/edgeswarm-node
+    fi
 
     systemctl daemon-reload 2>/dev/null || true
     ;;

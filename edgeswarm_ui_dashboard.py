@@ -261,7 +261,11 @@ class DashboardFrame(ctk.CTkFrame):
         self.row(self.left_panel, "Provider:", provider)
         self.row(self.left_panel, "Wallet:", short_middle(wallet, 12, 6) if wallet != "Not linked" else wallet)
         self.row(self.left_panel, "Hardware ID:", short_middle(hardware, 14, 6))
-        self.row(self.left_panel, "Platform:", "linux x64")
+        task_status = str(status.get("taskStatus") or "idle").strip().title()
+        current_task_id = status.get("currentTaskId")
+        task_display = f"{task_status} | Task {current_task_id}" if current_task_id else task_status
+        self.row(self.left_panel, "Task Status:", task_display)
+        self.row(self.left_panel, "Platform:", f"linux {model.get('architecture') or 'unknown'}")
 
         release_channel = str(
             release.get("releaseChannel") or "unknown"
@@ -368,11 +372,7 @@ class DashboardFrame(ctk.CTkFrame):
             return
 
         def worker():
-            pkexec([
-                "bash",
-                "-lc",
-                f"rm -f {AUTH_PATH} {STATUS_PATH}; systemctl disable --now {SERVICE_NAME}",
-            ], timeout=60)
+            pkexec(["/usr/local/bin/edgeswarm", "logout"], timeout=60)
             try:
                 if USER_CACHE_PATH.exists():
                     USER_CACHE_PATH.unlink()

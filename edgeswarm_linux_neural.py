@@ -8,6 +8,7 @@ import os
 import platform
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -34,53 +35,92 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 SMOKE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
-    "qwen2.5:3b": {
-        "modelId": "qwen2.5:3b",
-        "capability": "Neural-Inference-3B",
-        "tier": 2,
-        "patterns": ["qwen2.5*3b*.gguf", "Qwen2.5*3B*.gguf", "*qwen*2.5*3b*.gguf"],
-        "minRamGb": 8,
-        "defaultCtx": 2048,
-        "defaultMaxTokens": 256,
-    },
-    "qwen2.5:7b": {
-        "modelId": "qwen2.5:7b",
-        "capability": "Neural-Inference-7B",
-        "tier": 3,
-        "patterns": ["qwen2.5*7b*.gguf", "Qwen2.5*7B*.gguf", "*qwen*2.5*7b*.gguf"],
-        "minRamGb": 16,
-        "defaultCtx": 4096,
-        "defaultMaxTokens": 384,
-    },
-    "llama3.1:8b": {
-        "modelId": "llama3.1:8b",
-        "capability": "Neural-Inference-8B",
-        "tier": 3,
-        "patterns": ["llama*3.1*8b*.gguf", "Llama*3.1*8B*.gguf", "*llama*8b*.gguf"],
-        "minRamGb": 16,
-        "defaultCtx": 4096,
-        "defaultMaxTokens": 384,
-    },
-    "qwen2.5:14b": {
-        "modelId": "qwen2.5:14b",
-        "capability": "Neural-Inference-14B",
-        "tier": 4,
-        "patterns": ["qwen2.5*14b*.gguf", "Qwen2.5*14B*.gguf", "*qwen*14b*.gguf"],
-        "minRamGb": 32,
-        "defaultCtx": 4096,
-        "defaultMaxTokens": 512,
-    },
-}
+QWEN_GENERATIVE_MAX_TOKENS = 384
+QWEN_CODE_MAX_TOKENS = 1024
+QWEN_JSON_MAX_TOKENS = 640
+QWEN_EXACT_MAX_TOKENS = 120
 
-CAPABILITY_TO_MODEL_PRIORITY = {
-    "Neural-Inference-3B": ["qwen2.5:3b"],
-    "Neural-Inference-7B": ["qwen2.5:7b"],
-    "Neural-Inference-8B": ["llama3.1:8b"],
-    "Neural-Inference-14B": ["qwen2.5:14b"],
-    "Neural-Inference": ["qwen2.5:3b", "qwen2.5:7b", "llama3.1:8b", "qwen2.5:14b"],
-}
 
+def is_code_generation_prompt_v2(prompt):
+    text = str(prompt or "").lower()
+    wants_code_only = any(token in text for token in [
+        "return code only",
+        "code only",
+        "no markdown fences",
+        "no language label",
+    ])
+    looks_like_code_task = any(token in text for token in [
+        "react",
+        "component",
+        "javascript",
+        "typescript",
+        "jsx",
+        "tsx",
+        "code",
+        "function",
+        "fetch",
+        "api",
+        "export default",
+    ])
+    return wants_code_only and looks_like_code_task
+
+
+def is_json_response_prompt_v2(prompt):
+    text = str(prompt or "").lower()
+    return any(token in text for token in [
+        "return valid json only",
+        "return json only",
+        "use keys:",
+        "\"summary\"",
+        "\"risks\"",
+        "\"recommended_fixes\"",
+        "\"next_actions\"",
+    ])
+
+
+def linux_generation_settings_v1(prompt, task_mode=None, max_tokens=None):
+    mode = str(task_mode or "").strip().lower()
+    text = str(prompt or "")
+
+    if mode == "exact_extraction":
+        generation_mode = "exact_extraction"
+        budget = QWEN_EXACT_MAX_TOKENS
+        temperature = 0.0
+        top_p = 0.1
+    elif is_code_generation_prompt_v2(text):
+        generation_mode = "code"
+        budget = QWEN_CODE_MAX_TOKENS
+        temperature = 0.10
+        top_p = 0.85
+    elif is_json_response_prompt_v2(text):
+        generation_mode = "json"
+        budget = QWEN_JSON_MAX_TOKENS
+        temperature = 0.05
+        top_p = 0.75
+    else:
+        generation_mode = "general"
+        budget = QWEN_GENERATIVE_MAX_TOKENS
+        temperature = 0.15
+        top_p = 0.8
+
+    if max_tokens is not None:
+        try:
+            budget = min(budget, max(1, int(max_tokens)))
+        except (TypeError, ValueError):
+            pass
+
+    if generation_mode == "general" and any(
+        phrase in text.lower()
+        for phrase in ("one concise sentence", "one sentence", "single sentence")
+    ):
+        budget = min(budget, 64)
+
+    return {
+        "mode": generation_mode,
+        "maxTokens": max(1, int(budget)),
+        "temperature": temperature,
+        "topP": top_p,
+    }
 
 def _safe_shell(cmd: List[str], timeout: int = 6) -> str:
     try:
@@ -227,32 +267,26 @@ def smoke_marker_path(model_id: str) -> Path:
 def model_smoke_passed(model_id: str) -> bool:
     marker = smoke_marker_path(model_id)
     model_path = find_local_model_file(model_id)
-
     if not marker.exists() or not model_path:
         return False
-
     try:
         data = json.loads(marker.read_text())
+        stat = model_path.stat()
         recorded_path = data.get("modelPath")
-        recorded_hash = str(
-            data.get("modelSha256Prefix") or ""
-        ).strip().lower()
-        current_hash = _sha256_file(
-            model_path,
-            max_bytes=16 * 1024 * 1024,
-        )
-
+        recorded_hash = str(data.get("modelSha256") or "").strip().lower()
         return bool(
             data.get("smokePassed") is True
+            and data.get("smokeVersion") == "linux_model_smoke_v2"
             and recorded_path
             and Path(recorded_path).resolve() == model_path.resolve()
             and recorded_hash
-            and current_hash
-            and recorded_hash == current_hash.lower()
+            and int(data.get("modelSizeBytes") or -1) == stat.st_size
+            and int(data.get("modelMtimeNs") or -1) == stat.st_mtime_ns
+            and int(data.get("modelDevice") or -1) == stat.st_dev
+            and int(data.get("modelInode") or -1) == stat.st_ino
         )
     except Exception:
         return False
-
 
 def get_installed_model_ids() -> List[str]:
     return [model_id for model_id in MODEL_REGISTRY if find_local_model_file(model_id)]
@@ -353,6 +387,20 @@ def build_linux_neural_readiness() -> Dict[str, Any]:
             "modelPath": str(path) if path else None,
         }
 
+    required_tier_models = [
+        model_id
+        for model_id, spec in MODEL_REGISTRY.items()
+        if spec.get("required_for_tier") is True
+    ]
+    missing_required_models = [
+        model_id
+        for model_id in required_tier_models
+        if model_id not in ready
+    ]
+    primary_model_id = ready[0] if ready else None
+    fallback_models = ready[1:] if len(ready) > 1 else []
+    level4_ready = bool(required_tier_models) and not missing_required_models
+
     neural_eligible = bool(caps)
     cuda = bool(profile.get("cudaAvailable"))
 
@@ -361,6 +409,11 @@ def build_linux_neural_readiness() -> Dict[str, Any]:
         "hardwareProfile": profile,
         "installedModels": installed,
         "readyModels": ready,
+        "primaryModelId": primary_model_id,
+        "fallbackModels": fallback_models,
+        "requiredTierModels": required_tier_models,
+        "missingRequiredModels": missing_required_models,
+        "level4Ready": level4_ready,
         "neuralCapabilities": caps,
         "neuralEligible": neural_eligible,
         "neuralCapabilityActive": neural_eligible,
@@ -401,14 +454,35 @@ def select_model_for_required_model(required_model: str) -> Optional[str]:
     return None
 
 
-def can_handle_linux_neural_task(required_model: str) -> Dict[str, Any]:
-    selected = select_model_for_required_model(required_model)
+def select_model_for_task_v1(required_model: str, selected_model: Optional[str] = None):
+    requested = normalize_selected_model(selected_model)
+
+    if not requested or requested == "tier:auto":
+        return select_model_for_required_model(required_model), None
+
+    if requested not in MODEL_REGISTRY:
+        return None, "unsupported_selected_model"
+
+    ready = set(get_ready_model_ids())
+    if requested not in ready:
+        return None, "selected_model_not_ready"
+
+    required = str(required_model or "Neural-Inference").strip()
+    capability = str(MODEL_REGISTRY.get(requested, {}).get("capability") or "")
+
+    if required not in ("", "Neural-Inference") and capability != required:
+        return None, "selected_model_capability_mismatch"
+
+    return requested, None
+
+def can_handle_linux_neural_task(required_model: str, selected_model: Optional[str] = None) -> Dict[str, Any]:
+    selected, selection_error = select_model_for_task_v1(required_model, selected_model)
     readiness = build_linux_neural_readiness()
 
     if not selected:
         return {
             "ok": False,
-            "reason": "no_ready_local_model_for_required_model",
+            "reason": selection_error or "no_ready_local_model_for_required_model",
             "requiredModel": required_model,
             "neuralReadiness": readiness,
         }
@@ -462,8 +536,8 @@ def run_smoke_test(model_id: str) -> Dict[str, Any]:
         }
 
     spec = MODEL_REGISTRY[model_id]
-    n_gpu_layers = -1 if profile.get("cudaAvailable") else 0
     n_threads = max(2, min(16, os.cpu_count() or 2))
+    n_gpu_layers = -1 if profile.get("cudaAvailable") else 0
 
     started = time.time()
 
@@ -484,19 +558,25 @@ def run_smoke_test(model_id: str) -> Dict[str, Any]:
             text = str(result)[:200]
 
         elapsed_ms = int((time.time() - started) * 1000)
-        ok = bool(text)
+        model_stat = model_path.stat()
+        model_sha256 = _sha256_file(model_path)
+        ok = bool(text) and bool(model_sha256)
 
         marker = {
             "smokePassed": ok,
             "modelId": model_id,
             "capability": spec.get("capability"),
             "modelPath": str(model_path),
-            "modelSha256Prefix": _sha256_file(model_path, max_bytes=16 * 1024 * 1024),
+            "modelSha256": model_sha256,
+            "modelSizeBytes": model_stat.st_size,
+            "modelMtimeNs": model_stat.st_mtime_ns,
+            "modelDevice": model_stat.st_dev,
+            "modelInode": model_stat.st_ino,
             "responsePreview": text[:200],
             "elapsedMs": elapsed_ms,
             "hardwareProfile": profile,
             "timestamp": int(time.time()),
-            "smokeVersion": "linux_model_smoke_v1",
+            "smokeVersion": "linux_model_smoke_v2",
         }
 
         if ok:
@@ -514,17 +594,73 @@ def run_smoke_test(model_id: str) -> Dict[str, Any]:
         }
 
 
+_LINUX_LLM_CACHE_V1 = {}
+
+
+def _linux_llm_generate_cached_v1(Llama, selected, model_path, spec, n_threads, cuda_available, messages, max_tokens, temperature, top_p, stop):
+    n_ctx = int(spec.get("defaultCtx", 2048))
+    accelerations = ["cuda", "cpu"] if cuda_available else ["cpu"]
+    last_error = None
+
+    for acceleration in accelerations:
+        key = (selected, str(model_path), acceleration, n_ctx, n_threads)
+        llm = _LINUX_LLM_CACHE_V1.get(key)
+        model_warm = llm is not None
+        model_load_ms = 0
+
+        try:
+            if llm is None:
+                load_started = time.time()
+                llm = Llama(
+                    model_path=str(model_path),
+                    n_ctx=n_ctx,
+                    n_threads=n_threads,
+                    n_gpu_layers=-1 if acceleration == "cuda" else 0,
+                    verbose=False,
+                )
+                model_load_ms = int((time.time() - load_started) * 1000)
+                _LINUX_LLM_CACHE_V1.clear()
+                _LINUX_LLM_CACHE_V1[key] = llm
+
+            generation_started = time.time()
+            result = llm.create_chat_completion(
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                stop=stop,
+            )
+            generation_ms = int((time.time() - generation_started) * 1000)
+
+            return {
+                "result": result,
+                "runtimeAcceleration": acceleration,
+                "modelWarm": model_warm,
+                "modelLoadMs": model_load_ms,
+                "generationMs": generation_ms,
+                "cudaFallbackToCpu": bool(cuda_available and acceleration == "cpu"),
+            }
+        except Exception as exc:
+            last_error = exc
+            _LINUX_LLM_CACHE_V1.pop(key, None)
+            if acceleration == "cuda":
+                continue
+            raise
+
+    raise last_error or RuntimeError("linux_neural_generation_failed")
+
 def run_local_linux_neural_inference(
     prompt: str,
     required_model: str = "Neural-Inference",
     max_tokens: Optional[int] = None,
+    selected_model: Optional[str] = None,
 ) -> Dict[str, Any]:
-    selected = select_model_for_required_model(required_model)
+    selected, selection_error = select_model_for_task_v1(required_model, selected_model)
 
     if not selected:
         return {
             "ok": False,
-            "error": "no_ready_local_model_for_required_model",
+            "error": selection_error or "no_ready_local_model_for_required_model",
             "requiredModel": required_model,
             "neuralReadiness": build_linux_neural_readiness(),
         }
@@ -550,7 +686,6 @@ def run_local_linux_neural_inference(
     profile = get_linux_hardware_profile()
     spec = MODEL_REGISTRY[selected]
 
-    n_gpu_layers = -1 if profile.get("cudaAvailable") else 0
     n_threads = max(2, min(16, os.cpu_count() or 2))
 
     raw_prompt = str(prompt or "").strip()
@@ -582,69 +717,37 @@ def run_local_linux_neural_inference(
                     1,
                 )[0].strip()
 
-    requested_max = int(
-        max_tokens
-        or spec.get("defaultMaxTokens", 256)
-    )
-
-    concise_request = any(
-        phrase in user_text.lower()
-        for phrase in (
-            "one concise sentence",
-            "one sentence",
-            "single sentence",
-        )
-    )
-
-    if concise_request:
-        requested_max = min(requested_max, 64)
-    else:
-        requested_max = min(requested_max, 256)
-
-    requested_max = max(16, requested_max)
+    generation_settings = linux_generation_settings_v1(user_text, max_tokens=max_tokens)
+    generation_mode = generation_settings["mode"]
+    requested_max = generation_settings["maxTokens"]
+    temperature = generation_settings["temperature"]
+    top_p = generation_settings["topP"]
 
     started = time.time()
 
     try:
-        load_started = time.time()
-
-        llm = Llama(
-            model_path=str(model_path),
-            n_ctx=int(spec.get("defaultCtx", 2048)),
-            n_threads=n_threads,
-            n_gpu_layers=n_gpu_layers,
-            verbose=False,
-        )
-
-        model_load_ms = int(
-            (time.time() - load_started) * 1000
-        )
-
-        generation_started = time.time()
-
-        result = llm.create_chat_completion(
-            messages=[
-                {
-                    "role": "system",
-                    "content": system_text,
-                },
-                {
-                    "role": "user",
-                    "content": user_text,
-                },
+        generation = _linux_llm_generate_cached_v1(
+            Llama,
+            selected,
+            model_path,
+            spec,
+            n_threads,
+            profile.get("cudaAvailable") is True,
+            [
+                {"role": "system", "content": system_text},
+                {"role": "user", "content": user_text},
             ],
-            max_tokens=requested_max,
-            temperature=0.1,
-            top_p=0.9,
-            stop=[
-                "<|im_end|>",
-                "<|endoftext|>",
-            ],
+            requested_max,
+            temperature,
+            top_p,
+            ["<|im_end|>", "<|endoftext|>"],
         )
-
-        generation_ms = int(
-            (time.time() - generation_started) * 1000
-        )
+        result = generation["result"]
+        model_load_ms = generation["modelLoadMs"]
+        generation_ms = generation["generationMs"]
+        model_warm = generation["modelWarm"]
+        runtime_acceleration = generation["runtimeAcceleration"]
+        cuda_fallback_to_cpu = generation["cudaFallbackToCpu"]
 
         try:
             response_text = str(
@@ -684,11 +787,7 @@ def run_local_linux_neural_inference(
             "requiredModel": required_model,
             "modelPath": str(model_path),
             "runtime": "llama.cpp",
-            "runtimeAcceleration": (
-                "cuda"
-                if profile.get("cudaAvailable")
-                else "cpu"
-            ),
+            "runtimeAcceleration": runtime_acceleration,
             "latencyMs": int(
                 (time.time() - started) * 1000
             ),
@@ -699,7 +798,9 @@ def run_local_linux_neural_inference(
             "tokensGenerated": output_tokens,
             "tokensPerSecond": tokens_per_second,
             "maxTokens": requested_max,
-            "modelWarm": False,
+            "generationMode": generation_mode,
+            "modelWarm": model_warm,
+            "cudaFallbackToCpu": cuda_fallback_to_cpu,
         }
 
     except Exception as exc:
@@ -713,16 +814,9 @@ def run_local_linux_neural_inference(
 
 
 
-# EDGE_SWARM_WINDOWS_COMPAT_MODEL_REGISTRY_V1
+# EDGE_SWARM_CANONICAL_MODEL_REGISTRY_V1
 # Mirrors Windows node v1.5.11 canonical production packs.
-DEFAULT_NEURAL_MODEL_ID = "qwen2.5:14b"
-
-LEVEL_4_REQUIRED_MODEL_IDS = [
-    "qwen2.5-coder:14b",
-    "qwen2.5:14b",
-]
-
-WINDOWS_COMPAT_MODEL_REGISTRY = {
+MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "qwen2.5:3b": {
         "capability": "Neural-Inference-3B",
         "tier": 2,
@@ -731,7 +825,7 @@ WINDOWS_COMPAT_MODEL_REGISTRY = {
         "minRamGb": 8,
         "defaultCtx": 2048,
         "defaultMaxTokens": 256,
-        "filename_patterns": ["*Qwen2.5-3B*Q4_K_M*.gguf", "*qwen2.5*3b*q4_k_m*.gguf"],
+        "patterns": ["*Qwen2.5-3B*Q4_K_M*.gguf", "*qwen2.5*3b*q4_k_m*.gguf"],
     },
     "qwen2.5:7b": {
         "capability": "Neural-Inference-7B",
@@ -741,7 +835,7 @@ WINDOWS_COMPAT_MODEL_REGISTRY = {
         "minRamGb": 16,
         "defaultCtx": 4096,
         "defaultMaxTokens": 384,
-        "filename_patterns": ["*Qwen2.5-7B*Q4_K_M*.gguf", "*qwen2.5*7b*q4_k_m*.gguf"],
+        "patterns": ["*Qwen2.5-7B*Q4_K_M*.gguf", "*qwen2.5*7b*q4_k_m*.gguf"],
     },
     "llama3.1:8b": {
         "capability": "Neural-Inference-8B",
@@ -751,7 +845,7 @@ WINDOWS_COMPAT_MODEL_REGISTRY = {
         "minRamGb": 16,
         "defaultCtx": 4096,
         "defaultMaxTokens": 384,
-        "filename_patterns": ["*Llama-3.1-8B*Q4_K_M*.gguf", "*Meta-Llama-3.1-8B*Q4_K_M*.gguf", "*llama*3.1*8b*q4_k_m*.gguf"],
+        "patterns": ["*Llama-3.1-8B*Q4_K_M*.gguf", "*Meta-Llama-3.1-8B*Q4_K_M*.gguf", "*llama*3.1*8b*q4_k_m*.gguf"],
     },
     "qwen2.5:14b": {
         "capability": "Neural-Inference-14B",
@@ -761,7 +855,7 @@ WINDOWS_COMPAT_MODEL_REGISTRY = {
         "minRamGb": 32,
         "defaultCtx": 4096,
         "defaultMaxTokens": 512,
-        "filename_patterns": ["*Qwen2.5-14B*Q4_K_M*.gguf", "*qwen2.5*14b*q4_k_m*.gguf"],
+        "patterns": ["*Qwen2.5-14B*Q4_K_M*.gguf", "*qwen2.5*14b*q4_k_m*.gguf"],
     },
     "qwen2.5-coder:14b": {
         "capability": "Neural-Inference-14B",
@@ -771,7 +865,7 @@ WINDOWS_COMPAT_MODEL_REGISTRY = {
         "minRamGb": 32,
         "defaultCtx": 4096,
         "defaultMaxTokens": 1024,
-        "filename_patterns": ["*Qwen2.5-Coder-14B*Q4_K_M*.gguf", "*qwen2.5-coder*14b*q4_k_m*.gguf"],
+        "patterns": ["*Qwen2.5-Coder-14B*Q4_K_M*.gguf", "*qwen2.5-coder*14b*q4_k_m*.gguf"],
     },
     "gemma3:27b": {
         "capability": "Neural-Inference-27B",
@@ -781,7 +875,7 @@ WINDOWS_COMPAT_MODEL_REGISTRY = {
         "minRamGb": 48,
         "defaultCtx": 4096,
         "defaultMaxTokens": 512,
-        "filename_patterns": ["*gemma*3*27b*Q4_K_M*.gguf", "*gemma*27b*q4_k_m*.gguf"],
+        "patterns": ["*gemma*3*27b*Q4_K_M*.gguf", "*gemma*27b*q4_k_m*.gguf"],
     },
     "mistral-small:24b": {
         "capability": "Neural-Inference-24B",
@@ -791,7 +885,7 @@ WINDOWS_COMPAT_MODEL_REGISTRY = {
         "minRamGb": 48,
         "defaultCtx": 4096,
         "defaultMaxTokens": 512,
-        "filename_patterns": ["*Mistral-Small-24B*Q4_K_M*.gguf", "*mistral-small*24b*q4_k_m*.gguf"],
+        "patterns": ["*Mistral-Small-24B*Q4_K_M*.gguf", "*mistral-small*24b*q4_k_m*.gguf"],
     },
     "qwen3:30b": {
         "capability": "Neural-Inference-30B",
@@ -802,18 +896,11 @@ WINDOWS_COMPAT_MODEL_REGISTRY = {
         "minRamGb": 64,
         "defaultCtx": 4096,
         "defaultMaxTokens": 512,
-        "filename_patterns": ["*Qwen*3*30B*Q4_K_M*.gguf", "*qwen3*30b*q4_k_m*.gguf"],
+        "patterns": ["*Qwen*3*30B*Q4_K_M*.gguf", "*qwen3*30b*q4_k_m*.gguf"],
     },
 }
 
-MODEL_REGISTRY.clear()
-for _model_id, _spec in WINDOWS_COMPAT_MODEL_REGISTRY.items():
-    _copy = dict(_spec)
-    _copy["patterns"] = list(_spec.get("filename_patterns") or [])
-    MODEL_REGISTRY[_model_id] = _copy
-
-CAPABILITY_TO_MODEL_PRIORITY.clear()
-CAPABILITY_TO_MODEL_PRIORITY.update({
+CAPABILITY_TO_MODEL_PRIORITY = {
     "Neural-Inference-3B": ["qwen2.5:3b"],
     "Neural-Inference-7B": ["qwen2.5:7b"],
     "Neural-Inference-8B": ["llama3.1:8b"],
@@ -831,7 +918,7 @@ CAPABILITY_TO_MODEL_PRIORITY.update({
         "qwen2.5:7b",
         "qwen2.5:3b",
     ],
-})
+}
 
 def normalize_selected_model(model_id):
     model_id = str(model_id or "").strip()
@@ -870,6 +957,25 @@ def normalize_selected_model(model_id):
 
 
 
+def run_linux_neural_worker_loop_v1() -> int:
+    for line in sys.stdin:
+        line = str(line or "").strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+            result = run_local_linux_neural_inference(
+                str(request.get("prompt") or ""),
+                str(request.get("requiredModel") or "Neural-Inference"),
+                request.get("maxOutputTokens"),
+                request.get("selectedModel"),
+            )
+        except Exception as exc:
+            result = {"ok": False, "error": "neural_worker_crash", "details": str(exc)[:500]}
+        sys.stdout.write(json.dumps(result, separators=(",", ":")) + "\n")
+        sys.stdout.flush()
+    return 0
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", action="store_true")
@@ -877,15 +983,22 @@ def main() -> int:
     parser.add_argument("--smoke")
     parser.add_argument("--infer")
     parser.add_argument("--prompt", default="Return only the word READY.")
+    parser.add_argument("--prompt-stdin", action="store_true")
     parser.add_argument("--max-tokens", type=int, default=None)
+    parser.add_argument("--selected-model", default=None)
+    parser.add_argument("--worker-loop", action="store_true")
     args = parser.parse_args()
+
+    if args.worker_loop:
+        return run_linux_neural_worker_loop_v1()
 
     if args.smoke:
         print(json.dumps(run_smoke_test(args.smoke), indent=2))
         return 0
 
     if args.infer:
-        print(json.dumps(run_local_linux_neural_inference(args.prompt, args.infer, args.max_tokens), indent=2))
+        inference_prompt = sys.stdin.read() if args.prompt_stdin else args.prompt
+        print(json.dumps(run_local_linux_neural_inference(inference_prompt, args.infer, args.max_tokens, args.selected_model), indent=2))
         return 0
 
     readiness = build_linux_neural_readiness()
