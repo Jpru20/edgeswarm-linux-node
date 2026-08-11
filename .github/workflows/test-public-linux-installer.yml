@@ -41,27 +41,17 @@ jobs:
               ;;
           esac
 
-      - name: Install from public universal installer
+      - name: Install exact v0.1.11 x64 candidate
         shell: bash
         env:
-          INSTALLER_URL: https://github.com/Jpru20/edgeswarm-linux-node/releases/download/v0.1.11/install-linux.sh
+          DEB_URL: https://github.com/Jpru20/edgeswarm-linux-node/releases/download/v0.1.11/EdgeSwarm_Linux_x64_v0.1.11_PublicBeta.deb
+          DEB_SHA256: dd6a627e2f76c8d67fc9d467036b54bae9920133b8474d259ab25df9227781d7
         run: |
           set -euo pipefail
 
-          curl \
-            --fail \
-            --location \
-            --retry 4 \
-            --retry-delay 2 \
-            --connect-timeout 15 \
-            --max-time 120 \
-            --output /tmp/install-linux.sh \
-            "$INSTALLER_URL"
-
-          bash -n /tmp/install-linux.sh
-          chmod 0755 /tmp/install-linux.sh
-
-          sudo bash /tmp/install-linux.sh
+          curl --fail --location --retry 4 --retry-delay 2 --output /tmp/edgeswarm-v011.deb ""
+          echo "  /tmp/edgeswarm-v011.deb" | sha256sum -c -
+          sudo apt-get install -y /tmp/edgeswarm-v011.deb
 
       - name: Validate installed v0.1.11 package
         shell: bash
