@@ -47,7 +47,7 @@ jobs:
             > /tmp/edgeswarm-rpm-test/Dockerfile
 
           docker build \
-            --tag edgeswarm-fedora-arm64-rpm-test:v0.1.10 \
+            --tag edgeswarm-fedora-arm64-rpm-test:v0.1.11 \
             /tmp/edgeswarm-rpm-test
 
       - name: Start clean Fedora systemd container
@@ -64,7 +64,7 @@ jobs:
             --tmpfs /run \
             --tmpfs /run/lock \
             --volume /sys/fs/cgroup:/sys/fs/cgroup:rw \
-            edgeswarm-fedora-arm64-rpm-test:v0.1.10
+            edgeswarm-fedora-arm64-rpm-test:v0.1.11
 
           ready=false
 
@@ -90,7 +90,7 @@ jobs:
 
       - name: Install from public universal installer
         env:
-          INSTALLER_URL: https://github.com/Jpru20/edgeswarm-linux-node/releases/download/v0.1.10/install-linux.sh
+          INSTALLER_URL: https://github.com/Jpru20/edgeswarm-linux-node/releases/download/v0.1.11/install-linux.sh
         shell: bash
         run: |
           set -euo pipefail
@@ -116,7 +116,7 @@ jobs:
               bash /tmp/install-linux.sh
             '
 
-      - name: Validate installed v0.1.10 RPM package
+      - name: Validate installed v0.1.11 RPM package
         shell: bash
         run: |
           set -euo pipefail
@@ -192,9 +192,9 @@ jobs:
             echo "RPM_MANIFEST_RUNTIME_SHA256=$manifest_runtime_sha"
             echo "RPM_MANIFEST_NEURAL_SHA256=$manifest_neural_sha"
 
-            if [[ "$manifest_version" != "0.1.10" ]]
+            if [[ "$manifest_version" != "0.1.11" ]]
             then
-              echo "ERROR: Expected manifest version 0.1.10."
+              echo "ERROR: Expected manifest version 0.1.11."
               exit 1
             fi
 
@@ -210,13 +210,13 @@ jobs:
               exit 1
             fi
 
-            if [[ "$manifest_runtime_sha" != "a75587c72e1dd52ba4d5f83cb8429161e80c563ece8d6ec4b483b859cf4fe87c" ]]
+            if [[ "$manifest_runtime_sha" != "777c2e740340257888124d04b00e8d3c19e33c3be8b90148b07e6191fe8ce66b" ]]
             then
               echo "ERROR: Runtime SHA256 mismatch."
               exit 1
             fi
 
-            if [[ "$manifest_neural_sha" != "839d61276658b1be20102f7b3333f3ad871d68e3cbaec18b4c21eb3267c4383d" ]]
+            if [[ "$manifest_neural_sha" != "52587202839edf85a41481e78eb23b3aeac079abd78e1d5ee5552dda04478c28" ]]
             then
               echo "ERROR: Neural SHA256 mismatch."
               exit 1
