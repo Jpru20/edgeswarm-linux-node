@@ -286,7 +286,7 @@ jobs:
               "arm64",
           }
 
-          assert manifest["version"] == "0.1.10"
+          assert manifest["version"] == "0.1.11"
           assert manifest["architecture"] == "arm64"
 
           assert manifest["packageType"] in {
@@ -340,11 +340,11 @@ jobs:
       - name: Upload ARM64 artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: edgeswarm-linux-arm64-v0.1.10
+          name: edgeswarm-linux-arm64-v0.1.11
           if-no-files-found: error
           retention-days: 14
           path: |
-            release/EdgeSwarm_Linux_arm64_v0.1.10_PublicBeta.deb
-            release/EdgeSwarm_Linux_arm64_v0.1.10_PublicBeta.rpm
-            release/EdgeSwarm_Linux_arm64_v0.1.10_PublicBeta.tar.gz
-            release/EdgeSwarm_Linux_arm64_v0.1.10_SHA256SUMS.txt
+            release/EdgeSwarm_Linux_arm64_v0.1.11_PublicBeta.deb
+            release/EdgeSwarm_Linux_arm64_v0.1.11_PublicBeta.rpm
+            release/EdgeSwarm_Linux_arm64_v0.1.11_PublicBeta.tar.gz
+            release/EdgeSwarm_Linux_arm64_v0.1.11_SHA256SUMS.txt
